@@ -145,7 +145,11 @@ def parse_args():
     p = argparse.ArgumentParser(description="Train NAFNet for CCTV denoising")
 
     # data
-    p.add_argument("--train_dir", type=Path, required=True, help="folder of CLEAN images")
+    p.add_argument("--train_dir", type=Path, required=True, nargs="+",
+                   help="folder(s) of CLEAN images. Pass several to mix sources, "
+                        "e.g. synthetic CCTV scenes plus real photographs - the "
+                        "synthetic half supplies geometry, the real half supplies "
+                        "the fine texture a denoiser must learn to preserve.")
     p.add_argument("--noisy_train_dir", type=Path, default=None, help="paired noisy images (optional)")
     p.add_argument("--val_dir", type=Path, default=None)
     p.add_argument("--noisy_val_dir", type=Path, default=None)

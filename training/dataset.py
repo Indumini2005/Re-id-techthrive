@@ -35,6 +35,25 @@ def list_images(root: Path, recursive: bool = True) -> List[Path]:
     return sorted(p for p in it if p.suffix.lower() in IMG_EXTS)
 
 
+def collect_images(roots, recursive: bool = True) -> List[Path]:
+    """Images from one directory, or from several.
+
+    Mixing sources is the normal case rather than the exception: synthetic
+    CCTV scenes supply the right geometry and lighting, while real
+    photographs supply the fine texture and edge statistics that procedural
+    content lacks. A denoiser trained only on smooth synthetic frames learns
+    that smooth is always correct and erases real facial detail.
+    """
+    if isinstance(roots, (str, Path)):
+        roots = [roots]
+    paths: List[Path] = []
+    for root in roots:
+        found = list_images(Path(root), recursive)
+        print("[dataset] %-44s %6d images" % (str(root), len(found)))
+        paths.extend(found)
+    return paths
+
+
 def _strip_noise_suffix(stem: str, suffix: str = "_noise") -> str:
     return stem[: -len(suffix)] if stem.lower().endswith(suffix) else stem
 
@@ -88,7 +107,7 @@ class DenoiseDataset(Dataset):
         max_images: Optional[int] = None,
         degradation: Optional[DegradationConfig] = None,
     ):
-        self.clean_paths = list_images(Path(clean_dir))
+        self.clean_paths = collect_images(clean_dir)
         if max_images:
             self.clean_paths = self.clean_paths[:max_images]
         if not self.clean_paths:
@@ -163,7 +182,7 @@ class FullImageDataset(Dataset):
         max_side: Optional[int] = 1024,
         max_images: Optional[int] = None,
     ):
-        self.clean_paths = list_images(Path(clean_dir))
+        self.clean_paths = collect_images(clean_dir)
         if max_images:
             self.clean_paths = self.clean_paths[:max_images]
         self.noisy_lookup = {}
