@@ -37,6 +37,7 @@ import torch.nn as nn
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config  # noqa: E402
+from training.checkpoint import load_checkpoint, save_checkpoint  # noqa: E402
 from training.dataset import build_loaders, to_image  # noqa: E402
 from training.losses import build_loss, psnr, ssim  # noqa: E402
 from training.nafnet import build_nafnet, count_parameters  # noqa: E402
@@ -45,19 +46,36 @@ from training.nafnet import build_nafnet, count_parameters  # noqa: E402
 # --- helpers ---------------------------------------------------------------
 class EMA:
     """Exponential moving average of the weights. The averaged model is what
-    you export - it is reliably 0.1-0.3 dB better than the raw weights."""
+    you export - it is reliably 0.1-0.3 dB better than the raw weights.
 
-    def __init__(self, model: nn.Module, decay: float = 0.999):
+    The decay is warmed up rather than applied flat from step 1. At 0.999 the
+    average has a time constant of ~1000 steps, so a short run would export
+    something still close to the random initialisation and report a
+    validation PSNR far below what the model actually achieves. Ramping the
+    effective decay with step count makes the average track the live weights
+    early and settle into true averaging later.
+    """
+
+    def __init__(self, model: nn.Module, decay: float = 0.999, warmup: bool = True):
         self.decay = decay
+        self.warmup = warmup
+        self.step = 0
         self.shadow = deepcopy(model).eval()
         for p in self.shadow.parameters():
             p.requires_grad_(False)
 
+    def _effective_decay(self) -> float:
+        if not self.warmup:
+            return self.decay
+        return min(self.decay, (1.0 + self.step) / (10.0 + self.step))
+
     @torch.no_grad()
     def update(self, model: nn.Module) -> None:
+        self.step += 1
+        decay = self._effective_decay()
         for s, m in zip(self.shadow.state_dict().values(), model.state_dict().values()):
             if s.dtype.is_floating_point:
-                s.mul_(self.decay).add_(m.detach(), alpha=1 - self.decay)
+                s.mul_(decay).add_(m.detach(), alpha=1 - decay)
             else:
                 s.copy_(m)
 
@@ -118,25 +136,8 @@ def dump_samples(model: nn.Module, loader, device: torch.device, out_path: Path,
         cv2.imwrite(str(out_path), np.vstack(rows))
 
 
-def save_checkpoint(path: Path, model, ema, optimizer, epoch, step, best_psnr, args):
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "ema": ema.shadow.state_dict() if ema else None,
-            "optimizer": optimizer.state_dict(),
-            "epoch": epoch,
-            "step": step,
-            "best_psnr": best_psnr,
-            "arch": {
-                "width": args.width,
-                "enc_blks": args.enc_blks,
-                "middle_blks": args.middle_blks,
-                "dec_blks": args.dec_blks,
-            },
-            "args": vars(args),
-        },
-        path,
-    )
+# save_checkpoint / load_checkpoint live in training/checkpoint.py, so that
+# export and evaluate read exactly the format training writes.
 
 
 # --- main ------------------------------------------------------------------
@@ -268,10 +269,11 @@ def main():
 
     start_epoch, global_step, best_psnr = 0, 0, -1.0
     if args.resume and args.resume.exists():
-        ckpt = torch.load(args.resume, map_location=device)
+        ckpt = load_checkpoint(args.resume, map_location=device)
         model.load_state_dict(ckpt["model"])
         if ema and ckpt.get("ema"):
             ema.shadow.load_state_dict(ckpt["ema"])
+            ema.step = ckpt.get("ema_step", ckpt.get("step", 0))
         optimizer.load_state_dict(ckpt["optimizer"])
         start_epoch = ckpt["epoch"] + 1
         global_step = ckpt.get("step", 0)

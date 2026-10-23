@@ -20,21 +20,16 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config  # noqa: E402
-from training.nafnet import build_nafnet, count_parameters  # noqa: E402
+from training.checkpoint import build_from_checkpoint, load_checkpoint  # noqa: E402
+from training.nafnet import count_parameters  # noqa: E402
 
 
 def load_model(ckpt_path: Path, use_ema: bool = True):
-    ckpt = torch.load(ckpt_path, map_location="cpu")
-    arch = ckpt.get("arch", {})
-    model = build_nafnet(
-        width=arch.get("width"), enc=arch.get("enc_blks"),
-        middle=arch.get("middle_blks"), dec=arch.get("dec_blks"),
-    )
-    state = ckpt.get("ema") if (use_ema and ckpt.get("ema")) else ckpt.get("model", ckpt)
-    model.load_state_dict(state)
-    model.eval()
+    ckpt = load_checkpoint(ckpt_path)
+    model, arch = build_from_checkpoint(ckpt, use_ema=use_ema)
     print(f"loaded {ckpt_path.name} "
           f"({'EMA' if use_ema and ckpt.get('ema') else 'raw'} weights, "
+          f"arch {arch.get('name') or 'custom'} w{arch.get('width')}, "
           f"{count_parameters(model)/1e6:.2f}M params, "
           f"best PSNR {ckpt.get('best_psnr', float('nan')):.3f} dB)")
     return model
@@ -69,10 +64,7 @@ def main():
         dynamic_axes.setdefault("output", {}).update({2: "height", 3: "width"})
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    torch.onnx.export(
-        model,
-        dummy,
-        str(args.out),
+    export_kwargs = dict(
         export_params=True,
         opset_version=args.opset,
         do_constant_folding=True,
@@ -80,6 +72,16 @@ def main():
         output_names=["output"],
         dynamic_axes=dynamic_axes or None,
     )
+
+    # torch 2.6+ defaults to the dynamo exporter, which needs onnxscript and
+    # emits a more elaborate graph. The TorchScript path is the right choice
+    # here: it is available without extra packages and produces the plain
+    # conv/mul/pixel-shuffle graph that JetPack 4.6's ONNX Runtime 1.11
+    # understands. Older torch has no `dynamo` argument at all.
+    try:
+        torch.onnx.export(model, dummy, str(args.out), dynamo=False, **export_kwargs)
+    except TypeError:
+        torch.onnx.export(model, dummy, str(args.out), **export_kwargs)
     print(f"wrote {args.out}")
 
     # -- optional graph simplification

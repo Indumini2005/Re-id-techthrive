@@ -22,35 +22,49 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config  # noqa: E402
+from training.checkpoint import build_from_checkpoint, load_checkpoint  # noqa: E402
 from training.dataset import FullImageDataset, to_image  # noqa: E402
 from training.losses import psnr, ssim  # noqa: E402
-from training.nafnet import build_nafnet  # noqa: E402
 
 
 def load_torch_model(ckpt_path: Path, device: torch.device, use_ema: bool = True):
-    ckpt = torch.load(ckpt_path, map_location=device)
-    arch = ckpt.get("arch", {})
-    model = build_nafnet(
-        width=arch.get("width"), enc=arch.get("enc_blks"),
-        middle=arch.get("middle_blks"), dec=arch.get("dec_blks"),
-    )
-    state = ckpt.get("ema") if (use_ema and ckpt.get("ema")) else ckpt["model"]
-    model.load_state_dict(state)
+    ckpt = load_checkpoint(ckpt_path, map_location=device)
+    model, _ = build_from_checkpoint(ckpt, use_ema=use_ema)
     return model.to(device).eval()
 
 
 class OnnxRunner:
-    """Scores the exported graph through the same interface as the torch model."""
+    """Scores the exported graph through the real deployment path.
 
-    def __init__(self, path: Path, provider: str = "cpu"):
-        import onnxruntime as ort
+    It routes through ``pipeline.stage1_denoise.Denoiser`` rather than
+    calling the session directly, for two reasons. The graph is exported
+    with a fixed tile size, so a whole frame cannot be fed to it at all.
+    And tiling plus Hann blending is what actually runs on the device, so
+    measuring anything else would report a number the Jetson never achieves.
+    """
 
-        self.session = ort.InferenceSession(str(path), providers=config.provider_list(provider))
-        self.input_name = self.session.get_inputs()[0].name
+    def __init__(self, path: Path, provider: str = "cpu", tile: int = None,
+                 overlap: int = None):
+        from pipeline.stage1_denoise import Denoiser
+
+        self.denoiser = Denoiser(
+            model_path=path,
+            tile_size=tile if tile is not None else config.TILE_SIZE,
+            overlap=overlap if overlap is not None else config.TILE_OVERLAP,
+            provider=provider,
+        )
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.session.run(None, {self.input_name: x.cpu().numpy().astype(np.float32)})[0]
-        return torch.from_numpy(out)
+        import cv2
+
+        out = []
+        for sample in x:                                   # N,3,H,W RGB [0,1]
+            rgb = (sample.cpu().numpy().transpose(1, 2, 0) * 255.0).clip(0, 255).astype(np.uint8)
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            denoised = self.denoiser.denoise(bgr)
+            back = cv2.cvtColor(denoised, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            out.append(back.transpose(2, 0, 1))
+        return torch.from_numpy(np.stack(out))
 
 
 def main():
@@ -65,6 +79,9 @@ def main():
     ap.add_argument("--save_dir", type=Path, default=None, help="write side-by-side comparisons")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--no_ema", action="store_true")
+    ap.add_argument("--tile", type=int, default=None,
+                    help="tile size for --onnx; must match what was exported")
+    ap.add_argument("--overlap", type=int, default=None)
     args = ap.parse_args()
 
     if not (args.ckpt or args.onnx):
@@ -72,7 +89,8 @@ def main():
 
     device = torch.device("cpu" if args.onnx else args.device)
     model = (
-        OnnxRunner(args.onnx, provider=config.EXEC_PROVIDER)
+        OnnxRunner(args.onnx, provider=config.EXEC_PROVIDER,
+                   tile=args.tile, overlap=args.overlap)
         if args.onnx
         else load_torch_model(args.ckpt, device, use_ema=not args.no_ema)
     )
