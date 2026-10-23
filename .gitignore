@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Weights and engines - too large for git, and engines are machine-specific
+models/*.onnx
+models/*.engine
+models/*.pth
+models/*.pt
+models/trt_cache/
+*.calib
+
+# Generated data
+data/
+runs/
+captures/
+vector_db/
+degradation_preview.png
+
+.vscode/
+.idea/
+.DS_Store

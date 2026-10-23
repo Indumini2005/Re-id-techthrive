@@ -1,0 +1,51 @@
+# Jetson Nano (original, Maxwell 4GB) - JetPack 4.6 / L4T 32.7 / Python 3.6
+#
+# INFERENCE ONLY. Train and export on a workstation; see requirements.txt.
+#
+# Deliberately absent, because they require Python 3.8+ and cannot be
+# installed on this board:
+#   ultralytics  -> stage 2 runs the exported .onnx under ONNX Runtime
+#   gfpgan       -> stage 3 is optional; use --restore_mode escalate|never
+#   basicsr      -> only a GFPGAN dependency
+#   torch        -> not needed at inference; everything runs from ONNX
+
+# Last versions with Python 3.6 wheels for aarch64.
+numpy==1.19.5
+tqdm==4.64.1
+
+# dataclasses is stdlib from 3.7; 3.6 needs the backport.
+dataclasses==0.8; python_version < "3.7"
+
+# --- Installed outside pip, from JetPack or apt ---------------------------
+#
+# OpenCV: ships with JetPack, built with CUDA and GStreamer. Do NOT
+#   `pip install opencv-python` here - the PyPI aarch64 wheel has neither,
+#   and the GStreamer pipeline in pipeline/sources.py needs it.
+#     sudo apt install python3-opencv
+#
+# ONNX Runtime GPU: NVIDIA's JetPack 4.6 wheel, not PyPI.
+#     https://elinux.org/Jetson_Zoo#ONNX_Runtime
+#     pip3 install onnxruntime_gpu-1.11.0-cp36-cp36m-linux_aarch64.whl
+#
+# TensorRT + pycuda: from JetPack. Only needed to build engines on-device.
+#     sudo apt install python3-libnvinfer-dev
+#     pip3 install pycuda
+#
+# FAISS: no aarch64 py36 wheel exists. The pipeline falls back to an exact
+#   numpy inner-product index automatically, which is fine well past the
+#   few thousand vectors a watchlist holds. Build from source only if you
+#   actually need more.
+#     sudo apt install libopenblas-dev
+# --------------------------------------------------------------------------
+
+# --- Recommended system setup ---------------------------------------------
+# Swap (4 GB shared memory fills fast with two decoded streams):
+#     sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile
+#     sudo mkswap /swapfile && sudo swapon /swapfile
+#
+# Power (MAXN needs the barrel jack and the J48 jumper):
+#     sudo nvpmodel -m 0 && sudo jetson_clocks
+#
+# Run headless to reclaim ~500 MB from the desktop:
+#     sudo systemctl set-default multi-user.target
+# --------------------------------------------------------------------------

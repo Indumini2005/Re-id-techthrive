@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multi-Angle Identification</title>
+<style>
+:root{
+  --bg:#070b16; --panel:#0e1627; --panel-2:#131d33; --line:#1e2b47;
+  --ink:#e8eefc; --muted:#8699bd; --dim:#5d6f93;
+  --cyan:#35e0d4; --green:#49e68a; --amber:#ffc24b; --red:#ff5a6e;
+  --violet:#9a7bff; --blue:#4b9dff;
+  --r:14px; --gap:16px;
+  font-synthesis-weight:none;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{
+  background:
+    radial-gradient(1100px 600px at 12% -8%, #16244a 0%, transparent 60%),
+    radial-gradient(900px 500px at 92% 0%, #2a1b4d 0%, transparent 55%),
+    var(--bg);
+  color:var(--ink);
+  font-family:"Segoe UI",system-ui,-apple-system,Roboto,Helvetica,Arial,sans-serif;
+  font-size:14px; line-height:1.45; padding:18px; min-height:100%;
+}
+.wrap{max-width:1480px;margin:0 auto}
+
+/* ---------- header ---------- */
+header{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-bottom:18px}
+.brand{display:flex;align-items:baseline;gap:12px}
+h1{font-size:19px;letter-spacing:.3px;margin:0;font-weight:650}
+.sub{color:var(--dim);font-size:12.5px}
+.spacer{flex:1}
+.chip{
+  display:inline-flex;align-items:center;gap:8px;padding:6px 12px;
+  background:var(--panel);border:1px solid var(--line);border-radius:999px;
+  font-size:12.5px;color:var(--muted);white-space:nowrap;
+}
+.chip b{color:var(--ink);font-weight:600}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex:none}
+.dot.on{background:var(--green);box-shadow:0 0 0 3px rgba(73,230,138,.16)}
+.dot.off{background:var(--red);box-shadow:0 0 0 3px rgba(255,90,110,.16)}
+
+/* ---------- layout ---------- */
+.grid{display:grid;grid-template-columns:1fr 400px 1fr;gap:var(--gap);align-items:start}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:var(--gap);margin-top:var(--gap)}
+.card{
+  background:linear-gradient(180deg,var(--panel) 0%,#0b1322 100%);
+  border:1px solid var(--line);border-radius:var(--r);padding:16px;
+}
+.card h2{
+  margin:0 0 12px;font-size:11px;font-weight:700;letter-spacing:1.3px;
+  text-transform:uppercase;color:var(--dim);
+}
+
+/* ---------- camera ---------- */
+.cam-head{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.cam-name{font-weight:650;font-size:15px;letter-spacing:.4px}
+.frame{
+  position:relative;aspect-ratio:16/9;border-radius:10px;overflow:hidden;
+  background:#060a13 center/cover no-repeat;border:1px solid var(--line);
+  display:grid;place-items:center;
+}
+.frame img{width:100%;height:100%;object-fit:cover;display:block}
+.frame .empty{color:var(--dim);font-size:12.5px;letter-spacing:.4px}
+.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}
+.stat{background:var(--panel-2);border:1px solid var(--line);border-radius:9px;padding:8px 10px}
+.stat .k{font-size:10.5px;letter-spacing:.7px;text-transform:uppercase;color:var(--dim)}
+.stat .v{font-size:16px;font-weight:650;font-variant-numeric:tabular-nums;margin-top:1px}
+.faces{display:flex;gap:8px;margin-top:12px;min-height:56px;flex-wrap:wrap}
+.faces img{width:52px;height:52px;object-fit:cover;border-radius:8px;border:1px solid var(--line)}
+.faces .ph{
+  width:52px;height:52px;border-radius:8px;border:1px dashed var(--line);
+  display:grid;place-items:center;color:var(--dim);font-size:10px;
+}
+
+/* ---------- similarity ---------- */
+.sim{display:flex;flex-direction:column;align-items:center;text-align:center}
+.gauge{position:relative;width:260px;height:260px}
+.gauge svg{transform:rotate(-90deg);width:100%;height:100%}
+.gauge .mid{
+  position:absolute;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:2px;
+}
+.big{font-size:52px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-1.5px;line-height:1}
+.lab{font-size:10.5px;letter-spacing:1.4px;text-transform:uppercase;color:var(--dim)}
+.verdict{
+  margin-top:4px;padding:7px 16px;border-radius:999px;font-size:12.5px;font-weight:650;
+  letter-spacing:.5px;border:1px solid var(--line);background:var(--panel-2);color:var(--muted);
+}
+.verdict.same{color:var(--green);border-color:rgba(73,230,138,.4);background:rgba(73,230,138,.1)}
+.verdict.diff{color:var(--amber);border-color:rgba(255,194,75,.35);background:rgba(255,194,75,.09)}
+.verdict.alert{color:var(--red);border-color:rgba(255,90,110,.45);background:rgba(255,90,110,.12)}
+.idrow{margin-top:16px;width:100%}
+.idcard{
+  border:1px solid var(--line);border-radius:11px;padding:13px;background:var(--panel-2);
+  display:flex;flex-direction:column;gap:7px;
+}
+.idcard.hit{border-color:rgba(255,90,110,.5);background:rgba(255,90,110,.07)}
+.idname{font-size:17px;font-weight:650;letter-spacing:.2px}
+.kv{display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted)}
+.kv b{color:var(--ink);font-variant-numeric:tabular-nums;font-weight:600}
+.gain.pos{color:var(--green)} .gain.neg{color:var(--amber)}
+
+/* ---------- controls ---------- */
+.ctl{display:flex;flex-direction:column;gap:14px}
+.slider label{display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted);margin-bottom:7px}
+.slider label b{color:var(--ink);font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:var(--cyan);height:4px}
+select{
+  width:100%;background:var(--panel-2);color:var(--ink);border:1px solid var(--line);
+  border-radius:8px;padding:8px 10px;font-size:13px;font-family:inherit;
+}
+.hint{font-size:11.5px;color:var(--dim);margin-top:-4px}
+
+/* ---------- tables ---------- */
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{
+  text-align:left;font-size:10.5px;letter-spacing:.9px;text-transform:uppercase;
+  color:var(--dim);font-weight:600;padding:0 10px 8px 0;border-bottom:1px solid var(--line);
+}
+td{padding:9px 10px 9px 0;border-bottom:1px solid rgba(30,43,71,.5);font-variant-numeric:tabular-nums}
+tr:last-child td{border-bottom:none}
+.tag{
+  display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:650;
+  background:var(--panel-2);border:1px solid var(--line);color:var(--muted);
+}
+.tag.ok{color:var(--green);border-color:rgba(73,230,138,.35)}
+.tag.hot{color:var(--red);border-color:rgba(255,90,110,.4)}
+.tag.cool{color:var(--blue);border-color:rgba(75,157,255,.35)}
+.tag.v{color:var(--violet);border-color:rgba(154,123,255,.35)}
+.empty-row{color:var(--dim);font-style:italic;padding:16px 0}
+
+/* ---------- latency bars ---------- */
+.bars{display:flex;flex-direction:column;gap:9px}
+.bar-row{display:grid;grid-template-columns:92px 1fr 62px;align-items:center;gap:10px;font-size:12px}
+.bar-row .n{color:var(--muted)}
+.track{height:7px;border-radius:99px;background:var(--panel-2);overflow:hidden}
+.fill{height:100%;border-radius:99px;background:linear-gradient(90deg,var(--cyan),var(--blue));transition:width .25s}
+.bar-row .ms{text-align:right;color:var(--ink);font-variant-numeric:tabular-nums}
+
+@media (max-width:1180px){
+  .grid{grid-template-columns:1fr}
+  .row{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand">
+      <h1>Multi-Angle Identification</h1>
+      <span class="sub">cross-view fusion &middot; local only</span>
+    </div>
+    <div class="spacer"></div>
+    <span class="chip"><span id="linkDot" class="dot"></span><span id="linkTxt">connecting</span></span>
+    <span class="chip">sync <b id="skew">--</b></span>
+    <span class="chip">pairs <b id="pairs">0</b></span>
+    <span class="chip">gallery <b id="gallery">--</b></span>
+    <span class="chip">uptime <b id="uptime">0s</b></span>
+  </header>
+
+  <div class="grid">
+    <!-- CAM A -->
+    <section class="card" id="camA">
+      <div class="cam-head"><span class="dot"></span><span class="cam-name">—</span>
+        <div class="spacer"></div><span class="tag">waiting</span></div>
+      <div class="frame"><span class="empty">no signal</span></div>
+      <div class="meta">
+        <div class="stat"><div class="k">fps</div><div class="v f">0</div></div>
+        <div class="stat"><div class="k">subjects</div><div class="v s">0</div></div>
+        <div class="stat"><div class="k">clock</div><div class="v c">0ms</div></div>
+      </div>
+      <div class="faces"></div>
+    </section>
+
+    <!-- SIMILARITY -->
+    <section class="card sim">
+      <h2 style="align-self:flex-start">Cross-view similarity</h2>
+      <div class="gauge">
+        <svg viewBox="0 0 120 120">
+          <circle cx="60" cy="60" r="52" fill="none" stroke="#17223b" stroke-width="11"/>
+          <circle id="arc" cx="60" cy="60" r="52" fill="none" stroke="var(--cyan)"
+                  stroke-width="11" stroke-linecap="round"
+                  stroke-dasharray="326.7" stroke-dashoffset="326.7"
+                  style="transition:stroke-dashoffset .3s,stroke .3s"/>
+          <line id="tick" x1="60" y1="3" x2="60" y2="14" stroke="#ffffff"
+                stroke-width="2" opacity=".55" transform="rotate(0 60 60)"/>
+        </svg>
+        <div class="mid">
+          <div class="big" id="simVal">--</div>
+          <div class="lab">cosine A &harr; B</div>
+        </div>
+      </div>
+      <div class="verdict" id="verdict">waiting for both cameras</div>
+
+      <div class="idrow">
+        <div class="idcard" id="idCard">
+          <div class="idname" id="idName">No gallery match</div>
+          <div class="kv"><span>Fused score</span><b id="idScore">--</b></div>
+          <div class="kv"><span>Best single view</span><b id="idSolo">--</b></div>
+          <div class="kv"><span>Fusion gain</span><b id="idGain" class="gain">--</b></div>
+          <div class="kv"><span>Views agree</span><b id="idAgree">--</b></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CAM B -->
+    <section class="card" id="camB">
+      <div class="cam-head"><span class="dot"></span><span class="cam-name">—</span>
+        <div class="spacer"></div><span class="tag">waiting</span></div>
+      <div class="frame"><span class="empty">no signal</span></div>
+      <div class="meta">
+        <div class="stat"><div class="k">fps</div><div class="v f">0</div></div>
+        <div class="stat"><div class="k">subjects</div><div class="v s">0</div></div>
+        <div class="stat"><div class="k">clock</div><div class="v c">0ms</div></div>
+      </div>
+      <div class="faces"></div>
+    </section>
+  </div>
+
+  <div class="row">
+    <section class="card">
+      <h2>Tracks this frame pair</h2>
+      <table>
+        <thead><tr><th>Views</th><th>Cross-view</th><th>Identity</th><th>Fused</th><th>Gain</th><th></th></tr></thead>
+        <tbody id="tracks"><tr><td colspan="6" class="empty-row">no subjects detected</td></tr></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Alerts</h2>
+      <table>
+        <thead><tr><th>Time</th><th>Identity</th><th>Score</th><th>Cross-view</th><th>Views</th></tr></thead>
+        <tbody id="alerts"><tr><td colspan="5" class="empty-row">none yet</td></tr></tbody>
+      </table>
+    </section>
+  </div>
+
+  <div class="row">
+    <section class="card">
+      <h2>Thresholds</h2>
+      <div class="ctl">
+        <div class="slider">
+          <label>Cross-view (same person?) <b id="cvLab">0.45</b></label>
+          <input type="range" id="cv" min="0" max="1" step="0.01" value="0.45">
+          <div class="hint">Two live CCTV faces. Lower than the gallery threshold on purpose.</div>
+        </div>
+        <div class="slider">
+          <label>Gallery (positive ID) <b id="gtLab">0.65</b></label>
+          <input type="range" id="gt" min="0" max="1" step="0.01" value="0.65">
+          <div class="hint">Fused vector against an enrolled, clean reference.</div>
+        </div>
+        <div class="slider">
+          <label>Fusion mode</label>
+          <select id="fm">
+            <option value="mean">mean &mdash; average both angles</option>
+            <option value="max">max &mdash; strongest response per dimension</option>
+            <option value="first">first &mdash; single view (ablation)</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Stage latency</h2>
+      <div class="bars" id="bars"><div class="empty-row">waiting for nodes</div></div>
+    </section>
+  </div>
+</div>
+
+<script>
+"use strict";
+const C = 2 * Math.PI * 52;          // gauge circumference
+const $ = id => document.getElementById(id);
+const fmt = (v, d = 3) => (v === null || v === undefined || Number.isNaN(v)) ? "--" : Number(v).toFixed(d);
+
+let settings = { cross_view_threshold: 0.45, gallery_threshold: 0.65, fusion_mode: "mean" };
+let userEditing = false;
+
+/* ---------- camera panels ---------- */
+function renderCam(el, node, thumb, tracks) {
+  const dot = el.querySelector(".dot");
+  const tag = el.querySelector(".tag");
+  const frame = el.querySelector(".frame");
+  const faces = el.querySelector(".faces");
+
+  if (!node) {
+    el.querySelector(".cam-name").textContent = "—";
+    dot.className = "dot";
+    tag.textContent = "waiting"; tag.className = "tag";
+    return;
+  }
+
+  el.querySelector(".cam-name").textContent = node.name;
+  dot.className = "dot " + (node.online ? "on" : "off");
+  tag.textContent = node.online ? "live" : "offline";
+  tag.className = "tag " + (node.online ? "ok" : "hot");
+  el.querySelector(".v.f").textContent = fmt(node.fps, 1);
+  el.querySelector(".v.s").textContent = node.subjects;
+  el.querySelector(".v.c").textContent = fmt(node.clock_offset_ms, 0) + "ms";
+
+  if (thumb) {
+    let img = frame.querySelector("img");
+    if (!img) { frame.innerHTML = ""; img = document.createElement("img"); frame.appendChild(img); }
+    img.src = "data:image/jpeg;base64," + thumb;
+  } else if (!frame.querySelector("img")) {
+    frame.innerHTML = '<span class="empty">no signal</span>';
+  }
+
+  // restored face crops for this camera, across all tracks
+  const thumbs = [];
+  (tracks || []).forEach(t => t.views.forEach(v => {
+    if (v.camera === node.name && v.thumb) thumbs.push(v.thumb);
+  }));
+  faces.innerHTML = thumbs.length
+    ? thumbs.map(b => `<img src="data:image/jpeg;base64,${b}" alt="face">`).join("")
+    : '<div class="ph">no face</div>';
+}
+
+/* ---------- gauge ---------- */
+function renderGauge(sim, tracks) {
+  const arc = $("arc"), verdict = $("verdict");
+  const thr = settings.cross_view_threshold;
+  $("tick").setAttribute("transform", `rotate(${thr * 360} 60 60)`);
+
+  if (sim === null || sim === undefined) {
+    arc.style.strokeDashoffset = C;
+    $("simVal").textContent = "--";
+    verdict.textContent = "waiting for both cameras";
+    verdict.className = "verdict";
+    return;
+  }
+
+  const v = Math.max(0, Math.min(1, sim));
+  arc.style.strokeDashoffset = C * (1 - v);
+  $("simVal").textContent = fmt(sim, 3);
+
+  const matched = (tracks || []).some(t => t.is_match);
+  if (matched) {
+    arc.style.stroke = "var(--red)";
+    verdict.textContent = "THREAT MATCH";
+    verdict.className = "verdict alert";
+  } else if (sim >= thr) {
+    arc.style.stroke = "var(--green)";
+    verdict.textContent = "same person across both cameras";
+    verdict.className = "verdict same";
+  } else {
+    arc.style.stroke = "var(--amber)";
+    verdict.textContent = "different subjects";
+    verdict.className = "verdict diff";
+  }
+}
+
+/* ---------- identity card ---------- */
+function renderIdentity(tracks) {
+  const best = (tracks || [])
+    .filter(t => t.score !== null)
+    .sort((a, b) => (b.is_match - a.is_match) || (b.score - a.score))[0];
+  const card = $("idCard");
+
+  if (!best) {
+    card.className = "idcard";
+    $("idName").textContent = "No gallery match";
+    ["idScore", "idSolo", "idGain", "idAgree"].forEach(i => $(i).textContent = "--");
+    return;
+  }
+
+  card.className = "idcard" + (best.is_match ? " hit" : "");
+  $("idName").textContent = best.is_match ? best.identity : "Unknown subject";
+  $("idScore").textContent = fmt(best.score);
+
+  const solos = best.views.filter(v => v.solo).map(v => v.solo.score);
+  $("idSolo").textContent = solos.length ? fmt(Math.max(...solos)) : "--";
+
+  const gain = $("idGain");
+  gain.textContent = best.fusion_gain === null || best.fusion_gain === undefined
+    ? "--" : (best.fusion_gain >= 0 ? "+" : "") + fmt(best.fusion_gain);
+  gain.className = "gain " + (best.fusion_gain > 0 ? "pos" : best.fusion_gain < 0 ? "neg" : "");
+
+  $("idAgree").textContent = best.multiview ? (best.agreement ? "yes" : "no") : "single view";
+}
+
+/* ---------- tables ---------- */
+function renderTracks(tracks) {
+  const tb = $("tracks");
+  if (!tracks || !tracks.length) {
+    tb.innerHTML = '<tr><td colspan="6" class="empty-row">no subjects detected</td></tr>';
+    return;
+  }
+  tb.innerHTML = tracks.map(t => {
+    const views = t.cameras.join(" + ");
+    const badge = t.multiview
+      ? '<span class="tag v">' + t.n_views + '-view</span>'
+      : '<span class="tag">single</span>';
+    const idt = t.is_match
+      ? '<span class="tag hot">' + t.identity + '</span>'
+      : '<span class="tag">unknown</span>';
+    const esc = t.views.some(v => v.escalated) ? ' <span class="tag cool">GFPGAN</span>' : "";
+    const g = t.fusion_gain === null || t.fusion_gain === undefined ? "--"
+      : (t.fusion_gain >= 0 ? "+" : "") + fmt(t.fusion_gain);
+    return `<tr><td>${views} ${badge}</td><td>${t.multiview ? fmt(t.cross_view_score) : "--"}</td>
+            <td>${idt}${esc}</td><td>${fmt(t.score)}</td><td>${g}</td>
+            <td>${t.agreement ? '<span class="tag ok">agree</span>' : ""}</td></tr>`;
+  }).join("");
+}
+
+function renderAlerts(alerts) {
+  const tb = $("alerts");
+  if (!alerts || !alerts.length) {
+    tb.innerHTML = '<tr><td colspan="5" class="empty-row">none yet</td></tr>';
+    return;
+  }
+  tb.innerHTML = alerts.slice().reverse().map(a =>
+    `<tr><td>${a.at}</td><td><span class="tag hot">${a.identity}</span></td>
+     <td>${fmt(a.score)}</td><td>${fmt(a.cross_view)}</td>
+     <td>${a.cameras.join("+")}${a.multiview ? "" : ' <span class="tag">1v</span>'}</td></tr>`
+  ).join("");
+}
+
+function renderBars(nodes) {
+  const rows = [];
+  (nodes || []).forEach(n => Object.entries(n.stages_ms || {}).forEach(([k, v]) => {
+    rows.push({ label: k, ms: v });
+  }));
+  const el = $("bars");
+  if (!rows.length) { el.innerHTML = '<div class="empty-row">waiting for nodes</div>'; return; }
+  const max = Math.max(...rows.map(r => r.ms), 1);
+  el.innerHTML = rows.map(r =>
+    `<div class="bar-row"><div class="n">${r.label}</div>
+     <div class="track"><div class="fill" style="width:${(r.ms / max * 100).toFixed(1)}%"></div></div>
+     <div class="ms">${r.ms.toFixed(1)}ms</div></div>`
+  ).join("");
+}
+
+/* ---------- main ---------- */
+function render(d) {
+  if (d.settings && !userEditing) {
+    settings = d.settings;
+    $("cv").value = settings.cross_view_threshold;
+    $("cvLab").textContent = fmt(settings.cross_view_threshold, 2);
+    $("gt").value = settings.gallery_threshold;
+    $("gtLab").textContent = fmt(settings.gallery_threshold, 2);
+    $("fm").value = settings.fusion_mode;
+  }
+
+  const nodes = (d.nodes || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+  renderCam($("camA"), nodes[0], (d.frames || {})[nodes[0] && nodes[0].name], d.tracks);
+  renderCam($("camB"), nodes[1], (d.frames || {})[nodes[1] && nodes[1].name], d.tracks);
+
+  renderGauge(d.similarity, d.tracks);
+  renderIdentity(d.tracks);
+  renderTracks(d.tracks);
+  renderAlerts(d.alerts);
+  renderBars(nodes);
+
+  $("skew").textContent = d.skew_ms === undefined ? "--"
+    : fmt(d.skew_ms, 0) + "ms" + (d.in_sync ? "" : " !");
+  $("pairs").textContent = (d.stats && d.stats.pairs) || 0;
+  $("uptime").textContent = Math.floor(d.uptime_s || 0) + "s";
+  $("gallery").textContent = d.gallery
+    ? d.gallery.identities + " id / " + d.gallery.vectors + " vec" : "none";
+}
+
+/* ---------- settings ---------- */
+function push() {
+  fetch("/api/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      cross_view_threshold: parseFloat($("cv").value),
+      gallery_threshold: parseFloat($("gt").value),
+      fusion_mode: $("fm").value
+    })
+  }).catch(() => {});
+}
+["cv", "gt"].forEach(id => {
+  $(id).addEventListener("input", e => {
+    userEditing = true;
+    $(id + "Lab").textContent = fmt(e.target.value, 2);
+    settings[id === "cv" ? "cross_view_threshold" : "gallery_threshold"] = parseFloat(e.target.value);
+  });
+  $(id).addEventListener("change", () => { push(); setTimeout(() => userEditing = false, 400); });
+});
+$("fm").addEventListener("change", push);
+
+/* ---------- live feed ---------- */
+let es = null;
+function connect() {
+  es = new EventSource("/api/stream");
+  es.onopen = () => {
+    $("linkDot").className = "dot on";
+    $("linkTxt").textContent = "live";
+  };
+  es.onmessage = ev => {
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "update") render(msg.data);
+      else if (msg.type === "settings" && !userEditing) settings = msg.data;
+    } catch (_) {}
+  };
+  es.onerror = () => {
+    $("linkDot").className = "dot off";
+    $("linkTxt").textContent = "reconnecting";
+    es.close();
+    setTimeout(connect, 2000);
+  };
+}
+connect();
+</script>
+</body>
+</html>
