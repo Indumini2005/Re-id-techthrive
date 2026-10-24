@@ -193,6 +193,44 @@ stride-8 level. Varying the shape per call is free: mixed sizes measured
 5.64 ms/call against 5.71 ms for a fixed 192, and a never-before-seen shape
 cost nothing extra.
 
+### Which frame gets processed
+
+The cameras deliver 30 fps; the Nano processes a handful. So every cycle
+several frames arrive and one is used — and simply taking the newest is
+arbitrary, since that may be the one smeared by motion or the encoder.
+
+**Frame selection** (`FRAME_SELECT = "sharpest"`, `--frame_select`). Each
+camera thread scores every frame as it arrives: variance of the Laplacian
+on a 160 px-wide grey copy, ~1.8 ms for a 1080p frame on a laptop, off the
+main loop. The pairer then takes the best of the frames that arrived since
+its last decision:
+
+- a pair is ranked by its **weaker** view — it is only as useful as its
+  worse frame;
+- scores are compared **within** each camera, never across, because the raw
+  number depends on what the camera is pointed at;
+- a pair inside the sync window always beats a sharper one outside it;
+- frames passed over are never reconsidered, and nothing older than
+  `FRAME_SELECT_MAX_AGE_MS` (250) is a candidate — so the choice never
+  reaches back further than one inference cycle.
+
+The downscale is load-bearing, not just for speed: sensor noise has high
+Laplacian energy too. Measured on a test scene, a noisy *blurred* frame
+scores 828 against 199 for the clean sharp one at full resolution — noise
+wins — and 285 against 645 after the downscale.
+
+**Face quality gate** (`FACE_MIN_EYE_DIST`, `FACE_MAX_YAW`). After SCRFD
+finds a face, its landmarks give two numbers for free: how far apart the
+eyes are, and how far the nose sits off the eye midpoint (how turned the
+head is — measured along the eye line, so a tilted head is not mistaken for
+a turned one). A face that is too small or too side-on is skipped for that
+frame, which saves the ArcFace pass and, more importantly, avoids an
+embedding that resembles every other poor face. The session summary counts
+what was embedded and why the rest were refused.
+
+Both thresholds are reasoned starting points, **not measured on real
+faces**. Tune them once `enroll.py compare` can be run on real photos.
+
 `FACE_DETECT_SIZE` (640) is now the ceiling, used for full frames during
 enrolment; `FACE_DETECT_MIN` (128) is the floor, because below it small faces
 start to disappear. On the same laptop this took the whole per-person path
@@ -209,7 +247,7 @@ from 116.6 ms to 64.6 ms for one subject, and 433 ms to 225 ms for four.
 | `check_py36.py` | Fails loudly if device-side code uses post-3.6 syntax. |
 | `check_models.py` | Loads the three ONNX graphs, checks them against what the code assumes, times them. |
 | `setup_nano.sh` | One-time Nano setup on the stock Python 3.6: apt OpenCV, pip, numpy fix, onnxruntime-gpu, swap. |
-| `tests/run_all.py` | Runs the eight suites below. No model files, no camera needed. |
+| `tests/run_all.py` | Runs the nine suites below. No model files, no camera needed. |
 | `hub/server.py` | Hub: pairs nodes, fuses, matches, serves the dashboard. |
 | `hub/static/dashboard.html` | The operator UI. |
 | `hub/protocol.py` | Node↔hub wire format and clock-offset correction. |
@@ -252,7 +290,8 @@ plausible-looking output instead of an error:
 |---|---|
 | `test_align.py` | A warp that is subtly wrong yields a normal-looking face and a useless embedding. Asserts landmarks land on the reference to 0.00 px, that the transform has no shear, and that SCRFD box/landmark decoding is exact. |
 | `test_yolo_onnx.py` | Letterbox padding not undone — boxes land near the subject, so the crop looks fine and is wrong. |
-| `test_sync.py` | Frame pairing drift: a stale anchor can make one camera permanently consume the other's frames. |
+| `test_sync.py` | Frame pairing drift: a stale anchor can make one camera permanently consume the other's frames. Also frame selection: weaker-view ranking, per-camera scaling, no reuse, the age limit. |
+| `test_quality.py` | Noise passing for sharpness; a tilted head read as a turned one; the quality gate refusing the wrong faces. |
 | `test_fusion.py` | Two people merged into one track, or one person split across two. |
 | `test_hub.py` | A fresh observation fused with a minutes-old frame from a dead node. |
 | `test_index.py` | Gallery persistence and cosine matching across save/reload. |

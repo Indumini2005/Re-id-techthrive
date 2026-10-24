@@ -63,11 +63,16 @@ def _prepare_face(
                 print(f"  (restore skipped: {exc})")
 
     # Same detector and warp the live loop uses.
-    from pipeline.face_align import prepare_for_embedding
+    from pipeline import face_align
 
-    aligned = prepare_for_embedding(working, size=config.ARCFACE_INPUT)
+    aligned = face_align.prepare_for_embedding(working, size=config.ARCFACE_INPUT)
     if aligned is None and not quiet:
-        print("  (no face detected)")
+        reason = face_align.last_reject_reason
+        print({
+            "too_small": "  (face too small - eyes under %.0f px apart; use a closer photo)"
+                         % config.FACE_MIN_EYE_DIST,
+            "turned_away": "  (face turned too far from the camera; use a frontal photo)",
+        }.get(reason, "  (no face detected)"))
     return aligned
 
 

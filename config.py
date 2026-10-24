@@ -123,6 +123,27 @@ FACE_DETECT_MIN = 128           # floor; below this small faces start to go
 # such crops confidently. For an identification system, no answer is better.
 FACE_ALLOW_FALLBACK = False
 
+# Face quality gate, applied after detection and before ArcFace. A face that
+# fails is skipped for this frame - the same person is usually seen better a
+# cycle later - and the ArcFace pass, the most expensive stage, is saved.
+#   FACE_MIN_EYE_DIST: pixels between the eyes in the crop. The aligned face
+#       puts them 35 px apart, so below ~10 px ArcFace is embedding detail
+#       upscaled 3.5x or more that the camera never captured.
+#   FACE_MAX_YAW: nose offset from the eye midpoint, along the eye line, as a
+#       fraction of eye distance. ~0 frontal, ~0.5 full profile.
+# Both are reasoned starting points, NOT measured on real faces. Tune them
+# with enroll.py compare once real photos are available.
+FACE_MIN_EYE_DIST = 10.0
+FACE_MAX_YAW = 0.35
+
+# --- Frame selection ------------------------------------------------------
+# Inference is slower than the cameras, so several frames arrive per cycle
+# and only one is processed. "sharpest" picks the sharpest of those (scored
+# on the camera threads, free to the main loop); "newest" takes the latest.
+# MAX_AGE bounds how far back the choice may reach.
+FRAME_SELECT = "sharpest"
+FRAME_SELECT_MAX_AGE_MS = 250.0
+
 # --- Stage 4: ArcFace embedding -------------------------------------------
 ARCFACE_ONNX = MODELS_DIR / "arcface_w600k_r50.onnx"
 ARCFACE_INPUT = 112

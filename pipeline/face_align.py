@@ -265,6 +265,54 @@ def centre_crop_face(crop_bgr, size=112):
     return cv2.resize(canvas, (size, size), interpolation=interp)
 
 
+def face_quality(landmarks):
+    """Size and frontality of a face, from its five SCRFD landmarks.
+
+    -> (eye_distance_px, yaw_offset)
+
+    eye_distance_px: pixels between the eye centres in the source image. The
+        aligned 112x112 face puts them 35 px apart, so anything far below
+        that is being upscaled into detail that was never captured.
+    yaw_offset: how far the nose sits from the midpoint between the eyes,
+        measured along the eye line and divided by the eye distance. About 0
+        for a frontal face, rising towards 0.5 as the head turns to profile.
+        Measured along the eye line, not horizontally, so a tilted head is
+        not mistaken for a turned one.
+    """
+    pts = np.asarray(landmarks, dtype=np.float32).reshape(5, 2)
+    left_eye, right_eye, nose = pts[0], pts[1], pts[2]
+    axis = right_eye - left_eye
+    eye_dist = float(np.hypot(axis[0], axis[1]))
+    if eye_dist < 1e-6:
+        return 0.0, 1.0
+    unit = axis / eye_dist
+    mid = (left_eye + right_eye) / 2.0
+    yaw = abs(float(np.dot(nose - mid, unit))) / eye_dist
+    return eye_dist, yaw
+
+
+def quality_gate(landmarks):
+    """None if the face is usable, otherwise the reason it is not.
+
+    Rejecting here is not only about saving the ArcFace pass. A tiny or
+    side-on face gives an embedding that sits close to every other poor
+    face, and so can match the wrong person confidently. Skipping it costs
+    one frame; the next, better frame of the same person is a cycle away.
+    """
+    min_eye = getattr(config, "FACE_MIN_EYE_DIST", 10.0)
+    max_yaw = getattr(config, "FACE_MAX_YAW", 0.35)
+    eye_dist, yaw = face_quality(landmarks)
+    if eye_dist < min_eye:
+        return "too_small"
+    if yaw > max_yaw:
+        return "turned_away"
+    return None
+
+
+# How many faces each reason has stopped, for the session summary.
+QUALITY_STATS = {"accepted": 0, "too_small": 0, "turned_away": 0, "no_face": 0}
+last_reject_reason = None
+
 _detector = None
 _detector_lock = threading.Lock()
 _detector_failed = False
@@ -279,14 +327,16 @@ def get_face_detector(**kwargs):
     return _detector
 
 
-def prepare_for_embedding(crop_bgr, size=112, denoiser=None, allow_fallback=None):
+def prepare_for_embedding(crop_bgr, size=112, denoiser=None, allow_fallback=None,
+                          quality_check=True):
     """Person crop -> aligned face ready for ArcFace, or None.
 
     Restores first, then detects: the detector sees the cleaned crop, which
     is the point of stage 1 running before this.
     """
-    global _detector_failed
+    global _detector_failed, last_reject_reason
 
+    last_reject_reason = None
     if crop_bgr is None or crop_bgr.size == 0:
         return None
     if allow_fallback is None:
@@ -296,10 +346,20 @@ def prepare_for_embedding(crop_bgr, size=112, denoiser=None, allow_fallback=None
 
     if not _detector_failed:
         try:
-            aligned = get_face_detector().align_largest(working, size)
-            if aligned is not None:
-                return aligned
-            return None            # a detector that found nothing means no face
+            faces = get_face_detector().detect(working)
+            if not faces:              # a detector that found nothing means no face
+                last_reject_reason = "no_face"
+                QUALITY_STATS["no_face"] += 1
+                return None
+            _, _, landmarks = faces[0]
+            if quality_check:
+                reason = quality_gate(landmarks)
+                if reason is not None:
+                    last_reject_reason = reason
+                    QUALITY_STATS[reason] += 1
+                    return None
+            QUALITY_STATS["accepted"] += 1
+            return align_face(working, landmarks, size)
         except Exception as exc:
             _detector_failed = True
             print("[face] detector unavailable (%s)" % exc)

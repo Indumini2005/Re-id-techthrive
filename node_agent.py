@@ -264,6 +264,9 @@ def main():
     ap.add_argument("--escalate_above", type=float, default=config.ESCALATE_ABOVE)
     ap.add_argument("--threshold", type=float, default=config.MATCH_THRESHOLD)
     ap.add_argument("--max_subjects", type=int, default=2)
+    ap.add_argument("--frame_select", default=getattr(config, "FRAME_SELECT", "sharpest"),
+                    choices=["sharpest", "newest"],
+                    help="which of the frames arriving between sends to process")
 
     ap.add_argument("--no_denoise", action="store_true")
     ap.add_argument("--no_detect", action="store_true")
@@ -291,7 +294,17 @@ def main():
     fps_ema = 0.0
     next_due = time.monotonic()
 
-    print("streaming at up to %.1f obs/s - Ctrl+C to stop\n" % args.fps)
+    # Frames that arrive between sends used to be read and discarded. With
+    # --frame_select sharpest the sharpest of them is kept and processed
+    # instead of whichever happened to arrive when the send fell due. See
+    # pipeline/sources.py for why sharpness is measured the way it is.
+    from pipeline.sources import frame_sharpness
+    select_sharpest = args.frame_select == "sharpest"
+    max_age = getattr(config, "FRAME_SELECT_MAX_AGE_MS", 250.0) / 1000.0
+    best = None                     # (sharpness, arrival time, frame)
+
+    print("streaming at up to %.1f obs/s, frame select: %s - Ctrl+C to stop\n"
+          % (args.fps, args.frame_select))
 
     try:
         while True:
@@ -301,13 +314,26 @@ def main():
                 cap.release()
                 time.sleep(1.0)
                 cap = open_capture(args.source, args.cap_width, args.cap_height)
+                best = None
                 continue
 
             now = time.monotonic()
+            if select_sharpest:
+                score = frame_sharpness(frame)
+                # Drop a held frame once it is too old to be worth sending.
+                if best is not None and now - best[1] > max_age:
+                    best = None
+                if best is None or score > best[0]:
+                    best = (score, now, frame)
+
             if now < next_due:
                 time.sleep(min(0.005, next_due - now))
                 continue
             next_due = now + interval
+
+            if select_sharpest and best is not None:
+                frame = best[2]
+            best = None
 
             t0 = time.perf_counter()
             subjects, annotated = process_frame(frame, stages, timer, args)

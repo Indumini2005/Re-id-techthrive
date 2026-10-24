@@ -244,6 +244,7 @@ def run(args):
         use_gstreamer=not args.no_gstreamer,
         target_fps=args.capture_fps,
         require_all=not args.allow_single_camera,
+        frame_select=args.frame_select,
     ).start()
 
     print(f"\ncameras: {', '.join(c['name'] + ' -> ' + c['url'] for c in cameras)}")
@@ -436,6 +437,13 @@ def run(args):
         print(f"inference fps         : {infer_fps_ema:.2f}")
         print(f"frames skipped        : {stats['skipped_frames']} "
               f"(inference could not keep up with capture)")
+        print(f"frame selection       : {stats['frame_select']} "
+              f"(a sharper, older frame won {stats['sharper_older_chosen']} time(s))")
+        from pipeline.face_align import QUALITY_STATS
+        q = QUALITY_STATS
+        print(f"faces                 : {q['accepted']} embedded, "
+              f"{q['too_small']} too small, {q['turned_away']} turned away, "
+              f"{q['no_face']} crops with no face")
         print(f"pairs out of sync     : {stats['skewed']}")
         print(f"reconnects            : {stats['reconnects']}")
         print(f"alerts raised         : {alerts}")
@@ -490,6 +498,10 @@ def parse_args():
     p.add_argument("--escalate_above", type=float, default=config.ESCALATE_ABOVE,
                    help="preliminary cosine above which escalate mode restores the face")
     p.add_argument("--max_subjects", type=int, default=config.YOLO_MAX_SUBJECTS)
+    p.add_argument("--frame_select", default=config.FRAME_SELECT,
+                   choices=["sharpest", "newest"],
+                   help="which of the frames that arrived during the last "
+                        "inference cycle to process")
     p.add_argument("--detect_every", type=int, default=1,
                    help="run inference every Nth frame pair")
     p.add_argument("--alert_cooldown", type=float, default=10.0, help="seconds per identity")

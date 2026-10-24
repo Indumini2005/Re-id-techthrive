@@ -12,6 +12,19 @@ Two rules drive the design:
 * **Pair before you infer.** Comparing a subject across two views only means
   something if both frames show the same moment. Frames further apart than
   ``sync_window_ms`` are reported as skewed rather than silently fused.
+
+Frame selection
+---------------
+Inference is slower than the cameras, so every cycle several frames arrive
+and only one can be processed. Taking the newest is arbitrary: it may be the
+one blurred by motion or by the encoder. Instead each reader thread scores
+every frame's sharpness as it arrives - off the main loop, a fraction of a
+millisecond on a downscaled grey copy - and ``read()`` picks the sharpest of
+the frames that arrived since its last decision.
+
+Only those frames are candidates, and none older than ``max_age_ms``, so the
+choice never reaches further back than one inference cycle: it trades a
+little recency for a frame worth processing, and cannot drift into the past.
 """
 
 import threading
@@ -33,10 +46,35 @@ class Frame:
     timestamp: float          # time.monotonic() at capture
     index: int                # per-camera frame counter
     camera: str
+    sharpness: Optional[float] = None   # see frame_sharpness(); None = unscored
 
     @property
     def shape(self):
         return self.image.shape
+
+
+SHARPNESS_WIDTH = 160
+
+
+def frame_sharpness(image: np.ndarray) -> float:
+    """Variance of the Laplacian on a small grey copy. Higher = sharper.
+
+    The downscale is not only for speed. Sensor noise also has high Laplacian
+    energy and would make a grainy low-light frame look 'sharp'; area
+    averaging down to 160 px wide removes most of that noise while keeping
+    the edges of anything large enough to matter.
+
+    The value depends on scene content, so it is only meaningful compared
+    with other frames from the same camera - which is how read() uses it.
+    """
+    h, w = image.shape[:2]
+    if w > SHARPNESS_WIDTH:
+        small = cv2.resize(image, (SHARPNESS_WIDTH, max(1, int(h * SHARPNESS_WIDTH / w))),
+                           interpolation=cv2.INTER_AREA)
+    else:
+        small = image
+    grey = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY) if small.ndim == 3 else small
+    return float(cv2.Laplacian(grey, cv2.CV_32F).var())
 
 
 @dataclass
@@ -91,9 +129,11 @@ class CameraStream:
         buffer_size: int = 8,
         reconnect_delay: float = 2.0,
         target_fps: Optional[float] = None,
+        score_frames: bool = True,
     ):
         self.url = url
         self.name = name
+        self.score_frames = score_frames
         self.codec = codec
         self.use_gstreamer = use_gstreamer and str(url).startswith("rtsp://")
         self.reconnect_delay = reconnect_delay
@@ -158,8 +198,18 @@ class CameraStream:
             self.frames_read += 1
             self._fps_window.append(now)
 
+            # Scored here, on the camera's own thread, so frame selection
+            # costs the inference loop nothing.
+            sharpness = None
+            if self.score_frames:
+                try:
+                    sharpness = frame_sharpness(image)
+                except cv2.error:
+                    sharpness = None
+
             with self._lock:
-                self._buffer.append(Frame(image, now, self.frames_read, self.name))
+                self._buffer.append(
+                    Frame(image, now, self.frames_read, self.name, sharpness))
 
             # Replay files at their real rate so sync behaves like it will live.
             if self.is_file and self.target_fps:
@@ -198,6 +248,13 @@ class CameraStream:
                 return None
             return min(self._buffer, key=lambda f: abs(f.timestamp - timestamp))
 
+    @staticmethod
+    def closest_in(frames: List[Frame], timestamp: float) -> Optional[Frame]:
+        """Same as closest_to, over a snapshot already taken."""
+        if not frames:
+            return None
+        return min(frames, key=lambda f: abs(f.timestamp - timestamp))
+
     @property
     def measured_fps(self) -> float:
         if len(self._fps_window) < 2:
@@ -217,9 +274,17 @@ class SyncedCapture:
         buffer_size: int = 8,
         target_fps: Optional[float] = config.CAPTURE_FPS,
         require_all: bool = True,
+        frame_select: str = getattr(config, "FRAME_SELECT", "sharpest"),
+        max_age_ms: float = getattr(config, "FRAME_SELECT_MAX_AGE_MS", 250.0),
     ):
         if not cameras:
             raise ValueError("no cameras configured")
+        if frame_select not in ("sharpest", "newest"):
+            raise ValueError("frame_select must be 'sharpest' or 'newest', got %r"
+                             % (frame_select,))
+
+        self.frame_select = frame_select
+        self.max_age = max_age_ms / 1000.0
 
         self.streams: Dict[str, CameraStream] = {}
         for i, cam in enumerate(cameras):
@@ -231,6 +296,7 @@ class SyncedCapture:
                 codec=cam.get("codec", "h264"),
                 buffer_size=buffer_size,
                 target_fps=target_fps,
+                score_frames=(frame_select == "sharpest"),
             )
 
         self.sync_window = sync_window_ms / 1000.0
@@ -241,6 +307,9 @@ class SyncedCapture:
         self.pairs_emitted = 0
         self.pairs_skewed = 0
         self.frames_skipped = 0
+        self.frames_selected_older = 0   # times a sharper, older frame won
+        # Newest reference frame seen at the last decision. Every frame after
+        # it is a fresh candidate; nothing at or before it is ever reused.
         self._last_reference_index = -1
 
     def start(self) -> "SyncedCapture":
@@ -268,46 +337,108 @@ class SyncedCapture:
             time.sleep(0.05)
         return False
 
-    def read(self, timeout: float = 5.0) -> Optional[FramePair]:
-        """Newest pair of frames, one per camera.
+    def _choose(self, candidates: List[Frame], others: Dict[str, List[Frame]]):
+        """Pick the anchor frame and its partners from this cycle's candidates.
 
-        Blocks until the reference camera produces a frame it has not already
-        handed out, then matches the other cameras against its timestamp.
-        Returns None on timeout.
+        Returns (anchor, {camera: frame}) with the anchor included.
+
+        'newest' keeps the old behaviour. 'sharpest' ranks each candidate by
+        the sharpness of its WEAKER view, because a pair is only as useful as
+        the worse of its two frames. Sharpness is normalised within each
+        camera first: raw values depend on what the camera is pointed at, so
+        a textured scene would otherwise outrank a plain one regardless of
+        blur. Pairs inside the sync window always beat pairs outside it.
+        """
+        def partners(anchor):
+            frames = {self.reference: anchor}
+            for name, snap in others.items():
+                match = CameraStream.closest_in(snap, anchor.timestamp)
+                if match is not None:
+                    frames[name] = match
+            return frames
+
+        newest = candidates[-1]
+        scored = [f for f in candidates if f.sharpness is not None]
+        if self.frame_select == "newest" or len(candidates) == 1 \
+                or len(scored) != len(candidates):
+            return newest, partners(newest)
+
+        def scale(frames):
+            values = [f.sharpness for f in frames if f.sharpness is not None]
+            top = max(values) if values else 0.0
+            return top if top > 0 else 1.0
+
+        ref_scale = scale(candidates)
+        other_scale = {name: scale(snap) for name, snap in others.items()}
+
+        best = None
+        for anchor in candidates:
+            frames = partners(anchor)
+            stamps = [f.timestamp for f in frames.values()]
+            in_sync = (max(stamps) - min(stamps)) <= self.sync_window
+            rel = [anchor.sharpness / ref_scale]
+            for name, f in frames.items():
+                if name == self.reference:
+                    continue
+                if f.sharpness is None:
+                    rel.append(0.0)
+                else:
+                    rel.append(f.sharpness / other_scale[name])
+            # Ties go to the newer frame: candidates are in arrival order.
+            key = (in_sync, min(rel), anchor.index)
+            if best is None or key > best[0]:
+                best = (key, anchor, frames)
+
+        return best[1], best[2]
+
+    def read(self, timeout: float = 5.0) -> Optional[FramePair]:
+        """The best pair of frames, one per camera, from this cycle.
+
+        Blocks until the reference camera has produced a frame newer than any
+        seen at the last decision. The candidates are every reference frame
+        that arrived since then, no older than max_age_ms; with
+        frame_select='sharpest' the sharpest pair among them wins, otherwise
+        the newest. Returns None on timeout.
         """
         deadline = time.monotonic() + timeout
         reference_stream = self.streams[self.reference]
 
         while time.monotonic() < deadline:
-            anchor = reference_stream.latest()
-            if anchor is None or anchor.index == self._last_reference_index:
+            latest = reference_stream.latest()
+            if latest is None or latest.index <= self._last_reference_index:
                 if self.exhausted:
                     return None
                 time.sleep(0.002)
                 continue
 
-            frames = {self.reference: anchor}
-            for name, stream in self.streams.items():
-                if name == self.reference:
-                    continue
-                match = stream.closest_to(anchor.timestamp)
-                if match is not None:
-                    frames[name] = match
+            snapshot = reference_stream.snapshot()
+            candidates = [f for f in snapshot
+                          if f.index > self._last_reference_index
+                          and latest.timestamp - f.timestamp <= self.max_age]
+            if not candidates:                  # cannot happen; latest qualifies
+                candidates = [latest]
 
-            # Keep retrying against this same anchor until the other cameras
+            others = {name: s.snapshot() for name, s in self.streams.items()
+                      if name != self.reference}
+            anchor, frames = self._choose(candidates, others)
+
+            # Keep retrying against this same set until the other cameras
             # catch up. Consuming it here instead would throw away the lead
             # camera's frames whenever the second stream starts a beat late.
             if self.require_all and len(frames) < len(self.streams):
                 time.sleep(0.002)
                 continue
 
-            # Only now is the anchor spent. Everything between the previously
-            # emitted frame and this one was dropped on purpose: inference
-            # could not keep up with the camera.
-            skipped = anchor.index - self._last_reference_index - 1
+            # Only now are the candidates spent. Everything that arrived since
+            # the last decision, except the one frame used, was dropped on
+            # purpose: inference could not keep up with the camera.
+            newest_index = candidates[-1].index
+            skipped = newest_index - self._last_reference_index - 1
             if self._last_reference_index >= 0 and skipped > 0:
                 self.frames_skipped += skipped
-            self._last_reference_index = anchor.index
+            if anchor.index != newest_index:
+                self.frames_selected_older += 1
+            self._last_reference_index = newest_index
 
             timestamps = [f.timestamp for f in frames.values()]
             skew_ms = (max(timestamps) - min(timestamps)) * 1000.0
@@ -328,6 +459,8 @@ class SyncedCapture:
             "pairs": self.pairs_emitted,
             "skewed": self.pairs_skewed,
             "skipped_frames": self.frames_skipped,
+            "frame_select": self.frame_select,
+            "sharper_older_chosen": self.frames_selected_older,
             "capture_fps": {n: round(s.measured_fps, 1) for n, s in self.streams.items()},
             "reconnects": {n: s.reconnects for n, s in self.streams.items()},
         }
