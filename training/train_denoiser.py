@@ -188,7 +188,16 @@ def parse_args():
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--name", default="nafnet")
-    p.add_argument("--resume", type=Path, default=None)
+    p.add_argument("--runs_dir", type=Path, default=config.RUNS_DIR,
+                   help="where checkpoints go. On Colab point this at mounted "
+                        "Google Drive, or a disconnect takes the run with it.")
+    p.add_argument("--resume", type=Path, default=None,
+                   help="continue a run: weights, optimizer state and epoch")
+    p.add_argument("--init_from", type=Path, default=None,
+                   help="start from another checkpoint's weights only, keeping a "
+                        "fresh optimizer and LR schedule. For fine-tuning a "
+                        "pretrained model, which converges far faster than "
+                        "training from scratch.")
     p.add_argument("--val_every", type=int, default=1, help="epochs between validations")
     p.add_argument("--sample_every", type=int, default=5)
     p.add_argument("--save_every", type=int, default=1)
@@ -232,7 +241,7 @@ def main():
     set_seed(args.seed)
     device = torch.device(args.device)
 
-    out_dir = config.RUNS_DIR / args.name
+    out_dir = Path(args.runs_dir) / args.name
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "args.json", "w", encoding="utf-8") as fh:
         json.dump({k: str(v) for k, v in vars(args).items()}, fh, indent=2)
@@ -272,6 +281,27 @@ def main():
     ema = EMA(model, args.ema_decay) if args.ema_decay > 0 else None
 
     start_epoch, global_step, best_psnr = 0, 0, -1.0
+
+    if args.init_from and Path(args.init_from).exists():
+        # Weights only. The optimizer, LR schedule and epoch counter stay
+        # fresh, which is what separates fine-tuning from resuming: a
+        # pretrained model wants a new (usually lower) schedule, not the tail
+        # of someone else's.
+        ckpt = load_checkpoint(args.init_from, map_location=device)
+        state = ckpt.get("ema") or ckpt.get("model") or ckpt
+        if isinstance(state, dict) and "params" in state:
+            state = state["params"]          # BasicSR/NAFNet release layout
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        loaded = len(model.state_dict()) - len(missing)
+        print(f"initialised from {Path(args.init_from).name}: "
+              f"{loaded}/{len(model.state_dict())} tensors loaded")
+        if missing or unexpected:
+            print(f"  {len(missing)} missing, {len(unexpected)} unexpected — "
+                  "the architectures differ. Check --arch matches the source, "
+                  "or the unmatched layers are training from scratch.")
+        if ema:
+            ema.shadow.load_state_dict(model.state_dict())
+
     if args.resume and args.resume.exists():
         ckpt = load_checkpoint(args.resume, map_location=device)
         model.load_state_dict(ckpt["model"])
