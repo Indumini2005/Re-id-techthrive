@@ -1,75 +1,11 @@
-"""Shared helpers: tiling, timing, drawing."""
+"""Shared helpers: timing, drawing, frame scaling."""
 
 import time
 from collections import defaultdict, deque
-from typing import List, Tuple
+from typing import List
 
 import cv2
 import numpy as np
-
-
-class ImageTiler:
-    """Splits a frame into overlapping tiles and blends them back with a
-    Hann window, so tile seams do not show up in the denoised output."""
-
-    def __init__(self, tile_size: int = 256, overlap: int = 128):
-        if overlap >= tile_size:
-            raise ValueError("overlap must be smaller than tile_size")
-        self.tile_size = tile_size
-        self.overlap = overlap
-        self.stride = tile_size - overlap
-        self.window = self._create_2d_window(tile_size)
-
-    @staticmethod
-    def _create_2d_window(size: int) -> np.ndarray:
-        h = np.hanning(size)
-        window_2d = np.outer(h, h)
-        return np.clip(window_2d, 1e-4, 1.0)[:, :, None].astype(np.float32)
-
-    def split(
-        self, img_bgr: np.ndarray
-    ) -> Tuple[List[np.ndarray], List[Tuple[int, int]], Tuple[int, int]]:
-        h, w = img_bgr.shape[:2]
-        pad_h = (
-            (self.stride - ((h - self.tile_size) % self.stride)) % self.stride
-            if h > self.tile_size
-            else (self.tile_size - h)
-        )
-        pad_w = (
-            (self.stride - ((w - self.tile_size) % self.stride)) % self.stride
-            if w > self.tile_size
-            else (self.tile_size - w)
-        )
-
-        padded = np.pad(img_bgr, ((0, pad_h), (0, pad_w), (0, 0)), mode="reflect")
-        pad_h_total, pad_w_total = padded.shape[:2]
-
-        tiles, coords = [], []
-        for y in range(0, pad_h_total - self.tile_size + 1, self.stride):
-            for x in range(0, pad_w_total - self.tile_size + 1, self.stride):
-                tiles.append(padded[y : y + self.tile_size, x : x + self.tile_size])
-                coords.append((y, x))
-
-        return tiles, coords, (pad_h_total, pad_w_total)
-
-    def merge(
-        self,
-        tiles: List[np.ndarray],
-        coords: List[Tuple[int, int]],
-        padded_shape: Tuple[int, int],
-        orig_shape: Tuple[int, int],
-    ) -> np.ndarray:
-        pad_h, pad_w = padded_shape
-        canvas = np.zeros((pad_h, pad_w, 3), dtype=np.float32)
-        weight_map = np.zeros((pad_h, pad_w, 1), dtype=np.float32)
-
-        for tile, (y, x) in zip(tiles, coords):
-            canvas[y : y + self.tile_size, x : x + self.tile_size] += tile * self.window
-            weight_map[y : y + self.tile_size, x : x + self.tile_size] += self.window
-
-        canvas /= np.clip(weight_map, 1e-6, None)
-        output = canvas[: orig_shape[0], : orig_shape[1]]
-        return np.clip(output * 255.0, 0, 255).astype(np.uint8)
 
 
 class StageTimer:

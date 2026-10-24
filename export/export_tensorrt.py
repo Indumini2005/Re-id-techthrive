@@ -1,8 +1,8 @@
 """Build a TensorRT engine from the exported ONNX graph. Run this ON the Jetson.
 
-    python export/export_tensorrt.py --onnx models/nafnet.onnx --precision fp16
-    python export/export_tensorrt.py --onnx models/nafnet.onnx --precision int8 \
-        --calib_dir data/calib
+    python export/export_tensorrt.py --onnx models/yolov8n.onnx --precision fp16
+    python export/export_tensorrt.py --onnx models/arcface_w600k_r50.onnx \
+        --precision fp16 --tile 112
 
 FP16 is the safe default on Orin: roughly 2x the FP32 throughput at a PSNR
 cost in the hundredths of a dB. INT8 roughly doubles it again but needs a
@@ -299,8 +299,9 @@ def main():
     ap.add_argument("--precision", default="fp16",
                     choices=["fp32", "fp16", "int8"],
                     help="fp16 is the floor on a Jetson Nano; Maxwell has no INT8")
-    ap.add_argument("--tile", type=int, default=config.TILE_SIZE,
-                    help="input side length for the optimization profile")
+    ap.add_argument("--tile", type=int, default=416,
+                    help="input side length for the optimization profile "
+                         "(416 for YOLOv8 on a Nano, 112 for ArcFace)")
     ap.add_argument("--opt_batch", type=int, default=1)
     ap.add_argument("--max_batch", type=int, default=4)
     # 4 GB shared memory on a Nano; a 2 GiB workspace will fail to allocate.

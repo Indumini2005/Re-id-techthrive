@@ -171,18 +171,15 @@ def main():
         from pipeline.stage1_denoise import get_denoiser
 
         denoiser = get_denoiser()
-        n_tiles = len(denoiser.tiler.split(denoise_input)[0]) if denoiser.tiler else 1
         out, stats = timed(denoiser.denoise, denoise_input, warmup=args.warmup, iters=args.iters)
         if args.denoise_scope == "frame":
             denoised = out
-        stats["tiles"] = n_tiles
-        stats["ms_per_tile"] = round(stats["mean"] / max(1, n_tiles), 2)
         stats["scope"] = args.denoise_scope
+        stats["profile"] = denoiser.describe()
         stats["input"] = f"{denoise_input.shape[1]}x{denoise_input.shape[0]}"
         report["stages"]["1_denoise"] = stats
         print(f"1 denoise  : {stats['mean']:7.2f} ms  (p95 {stats['p95']:.2f})  "
-              f"{stats['input']} {args.denoise_scope}, "
-              f"{n_tiles} tiles @ {stats['ms_per_tile']:.2f} ms")
+              f"{stats['input']} {args.denoise_scope}, {stats['profile']}")
     except Exception as exc:
         print(f"1 denoise  : skipped ({exc})")
 

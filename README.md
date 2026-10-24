@@ -41,27 +41,32 @@ Both halves of that decision are what make the system fit on this board:
 the region that feeds ArcFace needs restoring, which cuts stage-1 work by
 one to two orders of magnitude.
 
-**Classical, not neural.** Measured on 96×192 crops against the CCTV
-degradation chain (`python bench_denoise.py`):
+**Classical, not neural.** Measured on 96×192 crops against a simulated
+CCTV degradation (`python bench_denoise.py`):
 
 | | gain | ms/crop (Nano est.) |
 |---|---|---|
-| `fast` — median3 | +4.7 dB | **0.9 ms** |
-| `balanced` — median3 + bilateral d7 | +6.8 dB | 7.9 ms |
-| `quality` — median3 + bilateral d9 | +7.0 dB | 13.4 ms |
+| `fast` — median3 | +2.5 dB | **0.8 ms** |
+| `balanced` — median3 + bilateral d7 | +3.2 dB | 7.8 ms |
+| `quality` — median3 + bilateral d9 | +3.2 dB | 12.1 ms |
 | non-local means (best config) | +2.5 dB | 126 ms |
-| NAFNet-SIDD, 128px tile | — | 57 ms |
+| *a neural denoiser, 128px tile* | *—* | *57 ms* |
 
-The default is `balanced`: ~32 ms per inference cycle for two cameras and two
+The default is `balanced`: ~31 ms per inference cycle for two cameras and two
 subjects each, leaving the frame budget to detection.
+
+The absolute gains move with how harsh you make the simulated degradation;
+the ordering and the cost ratios are what hold. Nano figures scale laptop
+timings by 6× — **re-measure on the board**, which the script does
+automatically when run there.
 
 Two results worth knowing, because both contradict the obvious design:
 
-**A 3×3 median does most of the work** — +4.7 dB for under a millisecond.
-That isn't luck: the degradation chain ends in JPEG, and impulse-like block
-artifacts are exactly what a median removes and what a Gaussian-assuming
-filter smears. It runs first so those artifacts don't corrupt the bilateral
-filter's range weights.
+**A 3×3 median does most of the work** — it recovers roughly 80% of the
+available gain for under a millisecond. That isn't luck: the degradation
+ends in JPEG, and impulse-like block artifacts are exactly what a median
+removes and what a Gaussian-assuming filter smears. It runs first so those
+artifacts don't corrupt the bilateral filter's range weights.
 
 **Non-local means is not worth it here.** It's the textbook answer and it
 lost: less gain than a median for 140× the cost.
@@ -69,10 +74,10 @@ lost: less gain than a median for 140× the cost.
 ### CLAHE and sharpening are off
 
 Both are implemented and both are disabled. Measured against the clean
-reference, CLAHE costs 7.5 dB raw and still 2.2 dB after matching
+reference, CLAHE loses several dB raw and still ~2 dB after matching
 first-order statistics — so it isn't just the intended tone change, it
-degrades structure. Unsharp masking costs a further 1.0 dB by re-amplifying
-residual noise.
+degrades structure. Unsharp masking costs a further ~1 dB by re-amplifying
+residual noise. `bench_denoise.py` prints both as an A/B against the default.
 
 They're kept because illumination normalisation is standard for face
 embedding under uneven lighting, and enrolment runs the same pipeline so
@@ -89,12 +94,13 @@ python bench_denoise.py --sweep  # the filter comparison above
 Run it **on the Jetson** for real numbers; elsewhere it prints a scaled
 estimate and says so.
 
-### There is no training step
+### No model, no training, no PyTorch
 
-Nothing in this project trains a model. Stage 1 ships as code; stages 2–4
-use published pretrained weights you download once. `--denoise_backend
-neural` will load a denoising ONNX if you point `config.NAFNET_ONNX` at one
-from elsewhere, but nothing here produces one and nothing needs it.
+Stage 1 is OpenCV and nothing else — there is no neural denoiser in this
+project, no code path that would load one, and no training step anywhere.
+Stages 2 and 4 use published pretrained ONNX graphs you download once.
+
+The device therefore installs no deep learning framework at all.
 
 ---
 
@@ -182,7 +188,7 @@ with `EDGE_PROFILE`. The `nano` profile sets 128px tiles, 32px overlap, the
 | `benchmark.py` | Per-stage latency, FPS and Jetson power draw. |
 | `pipeline/sources.py` | Threaded multi-camera RTSP capture and frame pairing. |
 | `pipeline/fusion.py` | Cross-view association and multi-angle identification. |
-| `pipeline/stage1_denoise.py` | NAFNet inference with overlap-blended tiling. |
+| `pipeline/stage1_denoise.py` | Classical crop restoration: median + bilateral, OpenCV only. |
 | `pipeline/stage2_detect.py` | YOLOv8 person detection and cropping. |
 | `pipeline/stage3_restore.py` | GFPGAN face reconstruction. |
 | `pipeline/stage4_embed.py` | ArcFace 512-D embeddings. |

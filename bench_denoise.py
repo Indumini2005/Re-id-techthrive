@@ -10,7 +10,7 @@ Nano's 4-core Cortex-A57 is roughly 6x slower per core than a current
 laptop CPU and stock JetPack OpenCV has no CUDA - these filters are CPU
 work there.
 
-Every default in pipeline/denoise_classical.py came out of this script.
+Every default in pipeline/stage1_denoise.py came out of this script.
 """
 
 import argparse
@@ -24,7 +24,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 
-from pipeline.denoise_classical import PROFILES, ClassicalDenoiser  # noqa: E402
+from pipeline.stage1_denoise import ClassicalDenoiser  # noqa: E402
 
 NANO_SCALE = 6.0
 
@@ -61,26 +61,43 @@ def psnr(a, b):
 
 
 def degrade(clean, rng):
-    """Approximate what a CCTV sensor and codec do to a frame.
+    """What a CCTV sensor and codec do to a frame, in the order they do it.
 
-    Optical softness, then sensor noise amplified by gain, then compression.
-    The order matters: JPEG runs last, as it does in a real camera, which is
-    why its block artifacts are the dominant structure left for stage 1 to
-    remove.
+    Optics soften; the sensor resolves less than the scene; gain amplifies
+    shot and read noise, badly so in low light; the codec then quantises
+    what is left into blocks.
+
+    The order is the point. JPEG runs last, as in a real camera, which is
+    why block artifacts are the dominant structure stage 1 has to deal with
+    and why a median beats filters that assume Gaussian noise.
     """
-    x = cv2.GaussianBlur(clean, (0, 0), rng.uniform(0.4, 1.2)).astype(np.float32)
+    x = cv2.GaussianBlur(clean, (0, 0), rng.uniform(0.4, 1.4)).astype(np.float32)
+
+    # sensor resolution: the frame is sampled below the optical limit
+    if rng.random() < 0.6:
+        h, w = x.shape[:2]
+        s = rng.uniform(0.45, 0.9)
+        small = cv2.resize(x, (max(2, int(w * s)), max(2, int(h * s))),
+                           interpolation=cv2.INTER_AREA)
+        x = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
 
     if rng.random() < 0.4:                       # low light: darken, gain back up
-        gamma = rng.uniform(1.3, 2.2)
+        gamma = rng.uniform(1.3, 2.4)
         x = np.clip(x / 255.0, 0, 1) ** gamma * 255.0
-        x += rng.normal(0, rng.uniform(6, 16), x.shape)
+        x += rng.normal(0, rng.uniform(8, 20), x.shape)
         x = np.clip(np.clip(x / 255.0, 0, 1) ** (1.0 / gamma) * 255.0, 0, 255)
     else:
-        x += rng.normal(0, rng.uniform(6, 22), x.shape)
+        x += rng.normal(0, rng.uniform(8, 28), x.shape)
+
+    # shot noise: variance tracks signal, unlike the read noise above
+    if rng.random() < 0.4:
+        scale = 2 ** rng.uniform(4, 8)
+        clipped = np.clip(x, 0, 255) / 255.0
+        x = np.clip(rng.poisson(clipped * scale) / scale, 0, 1) * 255.0
 
     x = np.clip(x, 0, 255).astype(np.uint8)
     ok, buf = cv2.imencode(".jpg", x, [int(cv2.IMWRITE_JPEG_QUALITY),
-                                       int(rng.integers(35, 80))])
+                                       int(rng.integers(30, 75))])
     return cv2.imdecode(buf, cv2.IMREAD_COLOR) if ok else x
 
 

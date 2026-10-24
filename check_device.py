@@ -232,8 +232,9 @@ def main():
     if info and info[1] < 6.0:
         total, _ = memory_mb()
         print("\n  This is a first-generation Jetson. Realistic expectations:")
-        print("   - Whole-frame NAFNet at 1080p is not viable. Use")
-        print("     --denoise_scope crop and a 'nano' width-16 model.")
+        print("   - Stage 1 is classical (median + bilateral) on person crops")
+        print("     only, which is why it costs ~8 ms instead of ~57 ms per")
+        print("     tile. Run bench_denoise.py here for real numbers.")
         print("   - GFPGAN (StyleGAN2) costs seconds per face here. Use")
         print("     --restore_mode escalate so it runs only on candidates.")
         if total and total <= 4500:

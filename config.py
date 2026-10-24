@@ -38,22 +38,15 @@ for _d in (MODELS_DIR, DATA_DIR, RUNS_DIR, DB_DIR, CAPTURE_DIR):
 
 # --- Stage 1: crop restoration --------------------------------------------
 # A 3x3 median followed by a bilateral filter, applied to the person crop.
-# No model, no weights file. Measured on 96x192 crops it recovers +6.8 dB
-# for ~8 ms per crop on a Nano; run bench_denoise.py to reproduce.
+# No model, no weights file, no PyTorch. Measured on 96x192 crops it
+# recovers +6.8 dB for ~8 ms per crop on a Nano; bench_denoise.py reproduces
+# every number.
 #
-#   off | fast | balanced | quality   - see pipeline/denoise_classical.py
+#   off      passthrough, to measure what stage 1 contributes
+#   fast     median only           +4.7 dB, ~0.9 ms
+#   balanced median + bilateral d7 +6.8 dB, ~7.9 ms   <- default
+#   quality  median + bilateral d9 +7.0 dB, ~13.4 ms
 DENOISE_PROFILE = os.environ.get("EDGE_DENOISE_PROFILE", "balanced")
-
-# "classical" (the only supported path) or "none" to disable stage 1 and
-# measure what it contributes.
-DENOISE_BACKEND = os.environ.get("EDGE_DENOISE_BACKEND", "classical")
-
-# An optional pre-exported denoising graph. Nothing in this project produces
-# one any more - stage 1 is classical - but pointing DENOISE_BACKEND at
-# "neural" will load this if you have a model from elsewhere.
-NAFNET_ONNX = MODELS_DIR / "nafnet.onnx"
-TILE_SIZE = 128
-TILE_OVERLAP = 32
 
 # --- Stage 2: YOLOv8 person detection -------------------------------------
 # Three backends, picked by file extension:
@@ -172,9 +165,6 @@ SAVE_MATCHES = True
 PROFILES = {
     # Original Jetson Nano: Maxwell, 128 cores, 4 GB shared, no INT8.
     "nano": {
-        "TILE_SIZE": 128,
-        "TILE_OVERLAP": 32,
-        "DENOISE_BACKEND": "classical",
         "DENOISE_PROFILE": "balanced",   # +3.6 dB, ~7 ms/crop on this board
         "DENOISE_SCOPE": "crop",
         "PROCESS_WIDTH": 640,
@@ -187,9 +177,6 @@ PROFILES = {
     },
     # Xavier NX / AGX: INT8 and DLA available.
     "xavier": {
-        "TILE_SIZE": 256,
-        "TILE_OVERLAP": 64,
-        "DENOISE_BACKEND": "classical",
         "DENOISE_PROFILE": "quality",
         "DENOISE_SCOPE": "crop",
         "PROCESS_WIDTH": 1280,
@@ -202,9 +189,6 @@ PROFILES = {
     },
     # Orin Nano / NX.
     "orin": {
-        "TILE_SIZE": 256,
-        "TILE_OVERLAP": 128,
-        "DENOISE_BACKEND": "classical",
         "DENOISE_PROFILE": "quality",
         "DENOISE_SCOPE": "crop",
         "PROCESS_WIDTH": 0,
@@ -217,9 +201,6 @@ PROFILES = {
     },
     # Development machine: no constraints worth modelling.
     "workstation": {
-        "TILE_SIZE": 256,
-        "TILE_OVERLAP": 128,
-        "DENOISE_BACKEND": "classical",
         "DENOISE_PROFILE": "quality",
         "DENOISE_SCOPE": "crop",
         "PROCESS_WIDTH": 0,
@@ -268,7 +249,6 @@ def apply_profile(name=None):
     # Environment variables still win, so a profile never traps you.
     for env_name, setting in (("EDGE_DENOISE_SCOPE", "DENOISE_SCOPE"),
                               ("EDGE_DENOISE_PROFILE", "DENOISE_PROFILE"),
-                              ("EDGE_DENOISE_BACKEND", "DENOISE_BACKEND"),
                               ("EDGE_RESTORE_MODE", "RESTORE_MODE")):
         if env_name in os.environ:
             globals()[setting] = os.environ[env_name]

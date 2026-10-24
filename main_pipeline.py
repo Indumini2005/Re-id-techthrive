@@ -56,12 +56,8 @@ class Stages:
             try:
                 from pipeline.stage1_denoise import get_denoiser
                 self.denoiser = get_denoiser(
-                    backend=getattr(args, "denoise_backend", None),
-                    profile=getattr(args, "denoise_profile", None),
-                )
-                print("[stage1] restorer ready: %s" % (
-                    self.denoiser.describe() if hasattr(self.denoiser, "describe")
-                    else "neural"))
+                    profile=getattr(args, "denoise_profile", None))
+                print("[stage1] restorer ready: %s" % self.denoiser.describe())
             except Exception as exc:
                 print(f"[stage1] disabled: {exc}")
                 self.enabled["denoise"] = False
@@ -461,12 +457,9 @@ def parse_args():
     # --- stages
     p.add_argument("--denoise_scope", default=config.DENOISE_SCOPE, choices=["frame", "crop"],
                    help="crop is the designed path; frame is kept only for an A/B")
-    p.add_argument("--denoise_backend", default=config.DENOISE_BACKEND,
-                   choices=["classical", "neural", "none"],
-                   help="classical needs no model and runs in a few ms per crop")
     p.add_argument("--denoise_profile", default=config.DENOISE_PROFILE,
                    choices=["off", "fast", "balanced", "quality"],
-                   help="classical backend only; see pipeline/denoise_classical.py")
+                   help="stage-1 strength; see pipeline/stage1_denoise.py")
     p.add_argument("--process_width", type=int, default=config.PROCESS_WIDTH,
                    help="downscale frames to this width before inference; 0 disables")
     p.add_argument("--restore_mode", default=config.RESTORE_MODE,

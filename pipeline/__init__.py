@@ -10,7 +10,7 @@ nothing; a model only loads when its stage is first used.
 
 from .fusion import CrossViewFusion, FusedTrack, ViewObservation, fuse_embeddings
 from .sources import CameraStream, Frame, FramePair, SyncedCapture, cameras_from_args
-from .stage1_denoise import Denoiser, denoise_frame
+from .stage1_denoise import ClassicalDenoiser, denoise_frame, get_denoiser, prepare_face
 from .stage2_detect import PersonDetector, get_person_crop, get_person_crops
 from .stage3_restore import FaceRestorer, restore_yolo_crop
 from .stage4_embed import ArcFaceEmbedder, extract_embedding
@@ -24,8 +24,10 @@ __all__ = [
     "SyncedCapture",
     "cameras_from_args",
     # stages
-    "Denoiser",
+    "ClassicalDenoiser",
     "denoise_frame",
+    "get_denoiser",
+    "prepare_face",
     "PersonDetector",
     "get_person_crop",
     "get_person_crops",
