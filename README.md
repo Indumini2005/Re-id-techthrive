@@ -208,6 +208,7 @@ from 116.6 ms to 64.6 ms for one subject, and 433 ms to 225 ms for four.
 | `check_device.py` | Probe the board: GPU, memory, INT8/DLA support, what will actually run. |
 | `check_py36.py` | Fails loudly if device-side code uses post-3.6 syntax. |
 | `check_models.py` | Loads the three ONNX graphs, checks them against what the code assumes, times them. |
+| `setup_nano.sh` | One-time Nano setup on the stock Python 3.6: apt OpenCV, pip, numpy fix, onnxruntime-gpu, swap. |
 | `tests/run_all.py` | Runs the eight suites below. No model files, no camera needed. |
 | `hub/server.py` | Hub: pairs nodes, fuses, matches, serves the dashboard. |
 | `hub/static/dashboard.html` | The operator UI. |
