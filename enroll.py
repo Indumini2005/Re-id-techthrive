@@ -33,7 +33,13 @@ IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}
 def _prepare_face(
     img_bgr: np.ndarray, denoise: bool, restore: bool, quiet: bool = False
 ) -> Optional[np.ndarray]:
-    """Raw image -> aligned face, through the same chain as live frames."""
+    """Raw image -> aligned face, through the same chain as live frames.
+
+    Enrolment must mirror the query path exactly. If a gallery vector comes
+    from an aligned face and a query vector from an unaligned crop, the
+    cosine between them measures the difference in framing as much as the
+    difference in identity, and no threshold fixes that.
+    """
     working = img_bgr
 
     if denoise:
@@ -51,12 +57,18 @@ def _prepare_face(
             if face is not None:
                 return face
             if not quiet:
-                print("  (GFPGAN found no face; using the raw image)")
+                print("  (GFPGAN found no face; falling through to alignment)")
         except Exception as exc:
             if not quiet:
                 print(f"  (restore skipped: {exc})")
 
-    return working
+    # Same detector and warp the live loop uses.
+    from pipeline.face_align import prepare_for_embedding
+
+    aligned = prepare_for_embedding(working, size=config.ARCFACE_INPUT)
+    if aligned is None and not quiet:
+        print("  (no face detected)")
+    return aligned
 
 
 def cmd_add(args) -> None:

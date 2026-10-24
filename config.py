@@ -86,6 +86,18 @@ RESTORE_MODE = os.environ.get("EDGE_RESTORE_MODE", "escalate")
 # the restored face would, so this is a deliberately generous pre-filter.
 ESCALATE_ABOVE = 0.40
 
+# --- Stage 3b: face detection and alignment -------------------------------
+# ArcFace is trained on faces warped so the eyes, nose and mouth corners sit
+# at fixed pixel positions. Handing it an unaligned person crop does not
+# degrade gracefully - the embedding ends up describing clothing and pose.
+#
+# SCRFD ships in the same insightface buffalo_l pack as the ArcFace model,
+# so this costs one extra file (~2.5 MB) and no new runtime.
+FACE_DETECT_ONNX = MODELS_DIR / "det_10g.onnx"
+FACE_DETECT_SIZE = 640          # SCRFD input; 320 is faster and misses more
+FACE_DETECT_CONF = 0.4
+FACE_DETECT_IOU = 0.4
+
 # --- Stage 4: ArcFace embedding -------------------------------------------
 ARCFACE_ONNX = MODELS_DIR / "arcface_w600k_r50.onnx"
 ARCFACE_INPUT = 112

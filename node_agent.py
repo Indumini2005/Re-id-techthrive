@@ -190,31 +190,43 @@ def process_frame(frame, stages, timer, args):
         embedding = None
 
         if stages.embedder:
+            from pipeline.face_align import prepare_for_embedding
+
+            # Align before embedding. ArcFace expects landmarks at fixed
+            # positions; an unaligned person crop embeds clothing and pose.
+            with timer("align"):
+                face = prepare_for_embedding(crop, size=config.ARCFACE_INPUT)
+            if face is None:
+                continue                      # no face here, nothing to send
+
             mode = args.restore_mode if stages.restorer else "never"
 
             if mode == "always":
                 with timer("restore"):
-                    face = stages.restorer.restore(crop)
+                    restored = stages.restorer.restore(crop)
+                if restored is not None:
+                    face = restored
                 with timer("embed"):
-                    embedding = stages.embedder.embed(face if face is not None else crop)
+                    embedding = stages.embedder.embed(face)
 
             elif mode == "never":
                 with timer("embed"):
-                    embedding = stages.embedder.embed(crop)
+                    embedding = stages.embedder.embed(face)
 
             else:   # escalate
                 with timer("embed"):
-                    embedding = stages.embedder.embed(crop)
+                    embedding = stages.embedder.embed(face)
                 if embedding is not None and stages.index is not None \
                         and stages.index.index.ntotal > 0:
                     prelim = stages.index.query(embedding, args.threshold)
                     if prelim.score >= args.escalate_above:
                         with timer("restore"):
-                            face = stages.restorer.restore(crop)
-                        if face is not None:
+                            restored = stages.restorer.restore(crop)
+                        if restored is not None:
                             with timer("embed"):
-                                better = stages.embedder.embed(face)
+                                better = stages.embedder.embed(restored)
                             if better is not None:
+                                face = restored
                                 embedding, escalated = better, True
 
         draw_box(annotated, subject.box, "person %.2f" % subject.conf, (53, 224, 212))

@@ -256,8 +256,17 @@ Python 3.7+. Stage 2 runs from ONNX instead, and stage 3 is optional.
 | File | Source | Needed for |
 |---|---|---|
 | `yolov8n.onnx` | `export/export_yolo.py --format onnx --imgsz 416` | **stage 2, required** |
+| `det_10g.onnx` | insightface `buffalo_l` pack | **face alignment, required** |
 | `arcface_w600k_r50.onnx` | insightface `buffalo_l` pack | **stage 4, required** |
-| `GFPGANv1.3.pth` | TencentARC/GFPGAN releases | stage 3, optional |
+| `GFPGANv1.3.pth` | TencentARC/GFPGAN releases | stage 3, optional — won't install on the Nano |
+
+`det_10g.onnx` and `arcface_w600k_r50.onnx` come from the **same** download,
+so that is one archive, not two.
+
+**Face alignment is not optional.** ArcFace is trained on faces warped so
+five landmarks sit at fixed pixel positions. Without the detector the
+pipeline falls back to an unaligned centre crop and says so — it keeps
+running, but recognition accuracy drops a long way.
 
 **Stage 1 needs no model file.** That is the point of the classical
 pipeline: two of the four stages ship as code, not weights.

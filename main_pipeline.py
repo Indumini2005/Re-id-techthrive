@@ -155,6 +155,8 @@ def _restore_and_embed(obs, camera: str, stages: Stages, timer: StageTimer, args
     if stages.embedder is None:
         return
 
+    from pipeline.face_align import prepare_for_embedding
+
     def embed(image, tag="embed"):
         if image is None or image.size == 0:
             return None
@@ -167,21 +169,34 @@ def _restore_and_embed(obs, camera: str, stages: Stages, timer: StageTimer, args
         with timer("restore:%s" % camera):
             return stages.restorer.restore(image)
 
+    # Detect and align the face before anything else touches it. Stage 4 is
+    # trained on faces warped onto fixed landmark positions; a person crop
+    # resized to 112x112 is not a weaker version of that, it is a different
+    # kind of image, and the embedding would describe clothing and pose.
+    with timer("align:%s" % camera):
+        aligned = prepare_for_embedding(obs.crop, size=config.ARCFACE_INPUT)
+
+    if aligned is None:
+        return                      # no face in this crop; nothing to embed
+    obs.face = aligned
+
     mode = args.restore_mode
     if stages.restorer is None:
         mode = "never"
 
     if mode == "never":
-        obs.embedding = embed(obs.crop)
+        obs.embedding = embed(aligned)
         return
 
     if mode == "always":
-        obs.face = restore(obs.crop)
-        obs.embedding = embed(obs.face if obs.face is not None else obs.crop)
+        restored = restore(obs.crop)
+        if restored is not None:
+            obs.face = restored
+        obs.embedding = embed(obs.face)
         return
 
     # --- escalate ---------------------------------------------------------
-    preliminary = embed(obs.crop, tag="embed_fast")
+    preliminary = embed(aligned, tag="embed_fast")
     obs.embedding = preliminary
     if preliminary is None:
         return
@@ -197,11 +212,12 @@ def _restore_and_embed(obs, camera: str, stages: Stages, timer: StageTimer, args
     if prelim.score < args.escalate_above:
         return
 
-    obs.face = restore(obs.crop)
-    if obs.face is None:
-        return
-    refined = embed(obs.face)
+    restored = restore(obs.crop)
+    if restored is None:
+        return                      # keep the aligned face and its embedding
+    refined = embed(restored)
     if refined is not None:
+        obs.face = restored
         obs.embedding = refined
         obs.escalated = True
 
