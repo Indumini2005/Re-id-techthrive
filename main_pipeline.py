@@ -279,10 +279,16 @@ def run(args):
     infer_fps_ema = 0.0
     last_tracks = []
 
+    # Report the mode that will actually be used, not the one requested.
+    # _restore_and_embed degrades to "never" when no restorer loaded - via
+    # --no_restore, or because gfpgan cannot install on Python 3.6 - and a
+    # banner claiming "always" there would misdescribe every later timing.
+    effective_restore = args.restore_mode if stages.restorer else "never"
+    restore_note = "" if stages.restorer else " (no restorer loaded)"
     print(f"\nprofile: {config.PROFILE} | denoise scope: {args.denoise_scope} "
           f"| process width: {args.process_width or 'native'} "
-          f"| restore: {args.restore_mode}"
-          + (f" (>{args.escalate_above})" if args.restore_mode == "escalate" else ""))
+          f"| restore: {effective_restore}{restore_note}"
+          + (f" (>{args.escalate_above})" if effective_restore == "escalate" else ""))
     print(f"fusion: {args.fusion} | cross-view >= {args.cross_view_threshold} "
           f"| gallery >= {args.threshold}")
     print("pipeline ready - 'q' quit, 's' snapshot, 'd' toggle denoised view\n")
