@@ -27,8 +27,6 @@ import numpy as np
 
 import config
 
-# Defined here rather than imported from training/, so the Jetson never needs
-# PyTorch installed just to enroll a subject.
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}
 
 

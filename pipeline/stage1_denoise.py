@@ -53,9 +53,10 @@ class Denoiser:
         self.model_path = Path(model_path or config.NAFNET_ONNX)
         if not self.model_path.exists():
             raise FileNotFoundError(
-                f"NAFNet weights not found at {self.model_path}. "
-                "Train one with training/train_denoiser.py, then run "
-                "export/export_onnx.py."
+                "No denoising model at %s. This project does not produce one - "
+                "stage 1 is classical. Either supply a graph from elsewhere, or "
+                "use the default backend (EDGE_DENOISE_BACKEND=classical)."
+                % self.model_path
             )
 
         opts = ort.SessionOptions()

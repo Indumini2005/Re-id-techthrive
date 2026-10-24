@@ -60,26 +60,34 @@ def psnr(a, b):
     return 99.0 if mse < 1e-9 else 10 * np.log10(255.0 ** 2 / mse)
 
 
+def degrade(clean, rng):
+    """Approximate what a CCTV sensor and codec do to a frame.
+
+    Optical softness, then sensor noise amplified by gain, then compression.
+    The order matters: JPEG runs last, as it does in a real camera, which is
+    why its block artifacts are the dominant structure left for stage 1 to
+    remove.
+    """
+    x = cv2.GaussianBlur(clean, (0, 0), rng.uniform(0.4, 1.2)).astype(np.float32)
+
+    if rng.random() < 0.4:                       # low light: darken, gain back up
+        gamma = rng.uniform(1.3, 2.2)
+        x = np.clip(x / 255.0, 0, 1) ** gamma * 255.0
+        x += rng.normal(0, rng.uniform(6, 16), x.shape)
+        x = np.clip(np.clip(x / 255.0, 0, 1) ** (1.0 / gamma) * 255.0, 0, 255)
+    else:
+        x += rng.normal(0, rng.uniform(6, 22), x.shape)
+
+    x = np.clip(x, 0, 255).astype(np.uint8)
+    ok, buf = cv2.imencode(".jpg", x, [int(cv2.IMWRITE_JPEG_QUALITY),
+                                       int(rng.integers(35, 80))])
+    return cv2.imdecode(buf, cv2.IMREAD_COLOR) if ok else x
+
+
 def build_pairs(w, h, count):
-    """(clean, degraded) pairs. Falls back to a built-in degradation if the
-    training package is unavailable, so this runs on the device too."""
-    try:
-        from training.degradations import PRESETS, degrade
-        return [(c, degrade(c, PRESETS["cctv"]))
-                for c in (make_crop(w, h, s) for s in range(count))]
-    except Exception:
-        print("note: training.degradations unavailable; using a built-in "
-              "approximation (blur + noise + JPEG)\n")
-        rng = np.random.default_rng(0)
-        pairs = []
-        for s in range(count):
-            clean = make_crop(w, h, s)
-            x = cv2.GaussianBlur(clean, (0, 0), 0.8).astype(np.float32)
-            x += rng.normal(0, 14, x.shape)
-            x = np.clip(x, 0, 255).astype(np.uint8)
-            ok, buf = cv2.imencode(".jpg", x, [int(cv2.IMWRITE_JPEG_QUALITY), 55])
-            pairs.append((clean, cv2.imdecode(buf, cv2.IMREAD_COLOR) if ok else x))
-        return pairs
+    """(clean, degraded) pairs."""
+    rng = np.random.default_rng(0)
+    return [(c, degrade(c, rng)) for c in (make_crop(w, h, s) for s in range(count))]
 
 
 def time_fn(fn, sample, max_seconds=1.0):

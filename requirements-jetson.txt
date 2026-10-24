@@ -2,12 +2,13 @@
 #
 # INFERENCE ONLY. Train and export on a workstation; see requirements.txt.
 #
-# Deliberately absent, because they require Python 3.8+ and cannot be
-# installed on this board:
-#   ultralytics  -> stage 2 runs the exported .onnx under ONNX Runtime
-#   gfpgan       -> stage 3 is optional; use --restore_mode escalate|never
+# Deliberately absent:
+#   torch        -> nothing on this device needs it. Stage 1 is OpenCV,
+#                   stages 2 and 4 are ONNX Runtime. There is no training.
+#   ultralytics  -> requires Python 3.8+. Stage 2 runs the exported .onnx.
+#   gfpgan       -> requires 3.7+. Stage 3 is optional; use
+#                   --restore_mode escalate|never
 #   basicsr      -> only a GFPGAN dependency
-#   torch        -> not needed at inference; everything runs from ONNX
 
 # Last versions with Python 3.6 wheels for aarch64.
 numpy==1.19.5

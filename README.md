@@ -89,11 +89,12 @@ python bench_denoise.py --sweep  # the filter comparison above
 Run it **on the Jetson** for real numbers; elsewhere it prints a scaled
 estimate and says so.
 
-### The neural path still exists
+### There is no training step
 
-`--denoise_backend neural` uses an exported NAFNet graph, and `training/`
-still trains one. Neither is on the critical path any more — nothing in the
-default configuration needs a model file for stage 1.
+Nothing in this project trains a model. Stage 1 ships as code; stages 2–4
+use published pretrained weights you download once. `--denoise_backend
+neural` will load a denoising ONNX if you point `config.NAFNET_ONNX` at one
+from elsewhere, but nothing here produces one and nothing needs it.
 
 ---
 
@@ -122,21 +123,21 @@ path on this board, not a fallback** — fix the slide that says "FP32 to INT8".
 **Python 3.6 on the device.** JetPack 4.6 is the last release for this board
 and ships Python 3.6.9. So:
 
-- Everything under `pipeline/`, plus `config.py`, `main_pipeline.py`,
-  `enroll.py`, `benchmark.py` and `denoise.py`, is written to import on 3.6.
-  No `from __future__ import annotations`, no f-string `=`, no walrus.
-  `training/` targets your workstation and is not constrained.
+- Every file that runs on the device imports on 3.6: no
+  `from __future__ import annotations`, no f-string `=`, no walrus.
 - **`ultralytics` requires Python 3.8+ and will not install on the Nano.**
-  Stage 2 therefore has a second backend: export YOLOv8 to ONNX on your
-  workstation and run it under ONNX Runtime, with the letterbox and NMS
-  implemented in `pipeline/stage2_detect.py`. This is the default.
+  Stage 2 therefore runs from ONNX, with the letterbox and NMS implemented
+  in `pipeline/stage2_detect.py`. Export the graph on a workstation once.
 - `gfpgan`/`basicsr` also require 3.7+. Stage 3 is optional at runtime and
   degrades to a passthrough; see the restoration policy below.
+- **No PyTorch on the device.** Stage 1 is OpenCV, stages 2 and 4 are ONNX
+  Runtime. That was a large part of the reason to drop the neural denoiser.
 - `pip install dataclasses` — a 3.6 backport is needed.
 
-**4 GB shared memory.** All four models resident at once will not fit
-alongside two decoded 1080p streams. Run headless (`--headless`) to free the
-desktop's ~500 MB, add swap, and keep GFPGAN out of the hot path.
+**4 GB shared memory.** Stage 1 holding no model at all helps here: the
+resident set is YOLOv8 plus ArcFace, not those two and a denoiser as well.
+Run headless (`--headless`) to free the desktop's ~500 MB, add swap, and
+keep GFPGAN out of the hot path.
 
 ### The restoration policy
 
@@ -186,17 +187,10 @@ with `EDGE_PROFILE`. The `nano` profile sets 128px tiles, 32px overlap, the
 | `pipeline/stage3_restore.py` | GFPGAN face reconstruction. |
 | `pipeline/stage4_embed.py` | ArcFace 512-D embeddings. |
 | `pipeline/stage5_match.py` | FAISS index, persistence, cosine matching. |
-| `pipeline/utils.py` | Tiler, stage timer, HUD drawing. |
-| `training/nafnet.py` | NAFNet architecture (PyTorch). |
-| `training/degradations.py` | Synthetic CCTV degradation chain. |
-| `training/dataset.py` | Paired and synthetic datasets. |
-| `training/losses.py` | PSNR / Charbonnier / edge losses, PSNR + SSIM metrics. |
-| `training/train_denoiser.py` | The training loop. |
-| `training/evaluate.py` | PSNR / SSIM scoring of a checkpoint or ONNX graph. |
-| `training/make_dataset.py` | Build pairs from image folders or video clips. |
-| `export/export_onnx.py` | Checkpoint → ONNX. |
-| `export/export_tensorrt.py` | ONNX → TensorRT engine (FP16; refuses INT8 on Maxwell). |
-| `export/export_yolo.py` | YOLOv8 → ONNX (for the Nano) or TensorRT. |
+| `pipeline/utils.py` | Stage timer, HUD drawing, frame downscale. |
+| `bench_denoise.py` | Measures stage 1; every default came out of it. |
+| `export/export_yolo.py` | YOLOv8 → ONNX (needed for the Nano) or TensorRT. |
+| `export/export_tensorrt.py` | Any ONNX → TensorRT engine (FP16; refuses INT8 on Maxwell). |
 
 `yolocropping.py`, `gpfgan.py` and `arcface_faiss.py` are thin shims kept so
 the original imports still resolve.
@@ -205,31 +199,23 @@ the original imports still resolve.
 
 ## Install
 
-The work splits across two machines. **Train and export on a workstation;
-the Nano only runs inference.**
+There is no training step. The only thing a workstation is needed for is
+exporting YOLOv8 to ONNX, because `ultralytics` cannot be installed on the
+Nano's Python 3.6.
 
-### Workstation (training + export)
+### Workstation (one-off: YOLOv8 → ONNX)
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install ultralytics onnx onnxsim
+python export\export_yolo.py --format onnx --imgsz 416
 ```
 
-Use Python 3.10 or 3.11. The default interpreter in this workspace is 3.14,
-and neither `basicsr` nor `gfpgan` builds there.
+Copy the resulting `models/yolov8n.onnx` to the Nano. That's the whole
+workstation role.
 
-`basicsr` is unmaintained and breaks in two ways: it needs `numpy<2`, and it
-imports `torchvision.transforms.functional_tensor`, removed in torchvision
-0.17. Either install `torchvision<0.17`, or patch the one line in
-`basicsr/data/degradations.py`:
-
-```python
-# from torchvision.transforms.functional_tensor import rgb_to_grayscale
-from torchvision.transforms.functional import rgb_to_grayscale
-```
-
-### Jetson Nano (inference only)
+### Jetson Nano
 
 JetPack 4.6, Python 3.6. Install the **NVIDIA JetPack wheels** for
 `onnxruntime-gpu` — the PyPI version has no CUDA support for aarch64.
@@ -247,123 +233,14 @@ Python 3.8+. Stage 2 runs from ONNX instead, and stage 3 is optional.
 
 ### Models to copy into `models/`
 
-| File | Source | Needed on |
+| File | Source | Needed for |
 |---|---|---|
-| `nafnet.onnx` | **you train this** — see below | Nano |
-| `yolov8n.onnx` | `export/export_yolo.py --format onnx --imgsz 416` | Nano |
-| `arcface_w600k_r50.onnx` | insightface `buffalo_l` pack | Nano |
-| `GFPGANv1.3.pth` | TencentARC/GFPGAN releases | optional |
+| `yolov8n.onnx` | `export/export_yolo.py --format onnx --imgsz 416` | **stage 2, required** |
+| `arcface_w600k_r50.onnx` | insightface `buffalo_l` pack | **stage 4, required** |
+| `GFPGANv1.3.pth` | TencentARC/GFPGAN releases | stage 3, optional |
 
----
-
-## Training the denoiser
-
-This is the one model you train yourself; the other three are pretrained.
-
-### 1. Get data
-
-You need **sharp** images. The degradation chain synthesizes the noisy side,
-so quality of the clean reference is what matters — never feed it footage
-that is already soft.
-
-```powershell
-# From your own video clips (sharp frames only, 2 per second)
-python -m training.make_dataset video --src clips\ --out data\train --fps 2
-
-# Or from a folder of stills
-python -m training.make_dataset images --src data\raw --out data\train
-```
-
-That writes `data/train/clean/` and `data/train/noisy/`. You can also skip
-this step entirely and let the degradation run on the fly, which gives the
-model fresh corruption every epoch:
-
-```powershell
-python -m training.train_denoiser --train_dir data\clean --preset cctv
-```
-
-### 2. Train
-
-```powershell
-python -m training.train_denoiser `
-    --train_dir data\train\clean `
-    --noisy_train_dir data\train\noisy `
-    --epochs 200 --batch_size 8 --patch_size 256 `
-    --width 32 --lr 1e-3 --preset cctv
-```
-
-Output lands in `runs/nafnet/`: `best.pth`, `last.pth`, a `log.csv`, and
-sample strips (`noisy | denoised | clean`) under `samples/` every 5 epochs.
-Look at those strips — the loss curve will not tell you that the model has
-started smearing faces.
-
-**On a Jetson Nano, train `--arch nano`.** The width-32 baseline is ~17M
-parameters and will not run usefully on 128 Maxwell cores:
-
-```powershell
-python -m training.train_denoiser --train_dir data\train\clean `
-    --noisy_train_dir data\train\noisy --arch nano --epochs 300 --patch_size 128
-```
-
-| `--arch` | Params | For |
-|---|---|---|
-| `base` | ~17M | Orin / workstation |
-| `small` | ~1.1M | Xavier |
-| `nano` | ~0.3M | **this board** |
-
-The architecture is recorded in the checkpoint, so export and inference pick
-it up automatically — a `nano` checkpoint cannot be silently loaded into a
-`base` graph.
-
-Useful knobs:
-
-- `--arch small` — if `nano` leaves visible noise and you can afford the
-  frame time. Measure with `benchmark.py` before deciding.
-- `--preset harsh` — heavier noise, low light, aggressive compression. Train
-  on this if your cameras are genuinely bad; it costs PSNR on easy footage.
-- `--loss psnr --edge_weight 0` — the stock NAFNet recipe. The default adds a
-  small edge term because stages 3–5 need facial detail preserved, and pure
-  PSNR optimization is happy to blur it away.
-- `--repeat 4` — four random patches per image per epoch, for small datasets.
-- `--resume runs\nafnet\last.pth` — pick training back up.
-
-### 3. Evaluate
-
-```powershell
-python -m training.evaluate --ckpt runs\nafnet\best.pth --data_dir data\val --save_dir runs\cmp
-```
-
-Reports PSNR/SSIM before and after, per image and in aggregate. Anything
-below about +3 dB gain means the degradation preset does not match your real
-cameras — retune `training/degradations.py` rather than training longer.
-
-### 4. Export
-
-```powershell
-# Workstation: NAFNet -> ONNX, and YOLOv8 -> ONNX for the device
-python export\export_onnx.py --ckpt runs\nafnet\best.pth --tile 128 --opset 12 --simplify
-python export\export_yolo.py --format onnx --imgsz 416
-```
-
-Copy both `.onnx` files plus the ArcFace model to the Nano's `models/`, then
-optionally build TensorRT engines **on the device**:
-
-```bash
-python3 export/export_tensorrt.py --onnx models/nafnet.onnx --precision fp16 --benchmark
-```
-
-**No INT8 on this board.** Compute capability 5.3 has no DP4A instruction, so
-`--precision int8` exits with a diagnostic rather than letting TensorRT
-quietly fall back. FP16 is the fastest available path here. Keep `--opset 12`
-— JetPack 4.6 ships ONNX Runtime 1.11, which does not understand newer opsets.
-
-Then verify the exported graph did not lose anything:
-
-Then verify the exported graph did not lose anything:
-
-```powershell
-python -m training.evaluate --onnx models\nafnet.onnx --data_dir data\val
-```
+**Stage 1 needs no model file.** That is the point of the classical
+pipeline: two of the four stages ship as code, not weights.
 
 ---
 
@@ -546,19 +423,17 @@ The loop will process roughly every 8th frame pair (~88% of frames dropped).
 Denoising is 84% of the per-camera cost - try --denoise_scope crop, INT8, or a narrower model.
 ```
 
-If you need the gap closed, in order of what to try (the `nano` profile
-already applies 1–4):
+With stage 1 classical and crop-scoped, **detection is now the bottleneck**,
+not denoising — the restorer costs ~32 ms per cycle against YOLOv8's much
+larger share. Tune in this order (the `nano` profile already applies 1–3):
 
 1. **`--process_width 640`** — downscale before any inference. Cost scales
-   with pixel count, so 1080p → 640×360 is a 9× cut for no recognition loss
-   once GFPGAN upscales the face crop anyway.
-2. **`--denoise_scope crop`** — detect on the noisy frame, then denoise only
-   the person box. Another 10–30× cut, because a person crop is a tiny
-   fraction of the frame. Detection tolerates noise; recognition does not.
-   This inverts stages 1 and 2 relative to the architecture slide, so measure
-   it before committing to it in the writeup.
+   with pixel count, so 1080p → 640×360 is a 9× cut.
+2. **`--yolo_imgsz 416`** — the detector is the dominant cost now; this is
+   where the remaining time is.
 3. **`--restore_mode escalate`** — keep GFPGAN off the hot path.
-4. **`--arch nano`** — retrain the denoiser at width 16.
+4. **`--denoise_profile fast`** — median only. +4.7 dB instead of +6.8 dB,
+   but 3.6 ms per cycle instead of 32 ms.
 5. **`--detect_every 2`** — run the stack on every second frame pair.
 6. **`--headless`** — frees ~500 MB and the compositor's GPU time, which
    matters on a 4 GB shared-memory board.

@@ -15,8 +15,10 @@ design, not just the numbers:
 * JetPack 4.6 is the final release, pinning the device to Python 3.6.
 
 Run ``python3 check_device.py`` on the board to see what it actually has.
-Everything under ``pipeline/`` is written to import on Python 3.6; the
-``training/`` package targets the workstation and does not have to be.
+Every file that runs on the device imports on Python 3.6.
+
+There is no training step and no PyTorch on the device: stage 1 is OpenCV,
+stages 2 and 4 are ONNX Runtime graphs you download once.
 """
 
 import os
@@ -35,53 +37,23 @@ for _d in (MODELS_DIR, DATA_DIR, RUNS_DIR, DB_DIR, CAPTURE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 # --- Stage 1: crop restoration --------------------------------------------
-# "classical" needs no model and no training: a 3x3 median followed by a
-# bilateral filter. Measured against the CCTV degradation chain on 96x192
-# crops it recovers +3.6 dB for ~7 ms per crop on a Nano, where the cheapest
-# network worth running costs ~57 ms per 128px tile. On this hardware that
-# is not a close call.
+# A 3x3 median followed by a bilateral filter, applied to the person crop.
+# No model, no weights file. Measured on 96x192 crops it recovers +6.8 dB
+# for ~8 ms per crop on a Nano; run bench_denoise.py to reproduce.
 #
-# "neural" uses an exported NAFNet graph; see pipeline/stage1_denoise.py.
-# "none" disables stage 1 entirely, for measuring what it contributes.
-DENOISE_BACKEND = os.environ.get("EDGE_DENOISE_BACKEND", "classical")
-
-# off | fast | balanced | quality. See pipeline/denoise_classical.py for the
-# measurements behind each.
+#   off | fast | balanced | quality   - see pipeline/denoise_classical.py
 DENOISE_PROFILE = os.environ.get("EDGE_DENOISE_PROFILE", "balanced")
 
-# --- Stage 1 (neural backend only) ----------------------------------------
+# "classical" (the only supported path) or "none" to disable stage 1 and
+# measure what it contributes.
+DENOISE_BACKEND = os.environ.get("EDGE_DENOISE_BACKEND", "classical")
+
+# An optional pre-exported denoising graph. Nothing in this project produces
+# one any more - stage 1 is classical - but pointing DENOISE_BACKEND at
+# "neural" will load this if you have a model from elsewhere.
 NAFNET_ONNX = MODELS_DIR / "nafnet.onnx"
-NAFNET_ENGINE = MODELS_DIR / "nafnet.engine"
-NAFNET_CKPT = MODELS_DIR / "nafnet.pth"
-
-# Tiling. Overridden by the hardware profile below: a Nano wants small tiles
-# and little overlap, because every extra tile is another full forward pass.
-TILE_SIZE = 256
-TILE_OVERLAP = 128
-
-# Model width/depth. Must match whatever you trained and exported.
-# The "nano" profile trains a width-16, single-block variant instead; see
-# NAFNET_ARCHS and training/train_denoiser.py --arch.
-NAFNET_WIDTH = 32
-NAFNET_ENC_BLKS = [1, 1, 1, 8]
-NAFNET_MIDDLE_BLKS = 1
-NAFNET_DEC_BLKS = [1, 1, 1, 1]
-
-# Named architectures, so training, export and inference cannot drift apart.
-NAFNET_ARCHS = {
-    # Paper-ish baseline. ~17M params. For an Orin or a workstation.
-    "base": {"width": 32, "enc": [1, 1, 1, 8], "middle": 1, "dec": [1, 1, 1, 1]},
-    # Half width, shallow bottleneck. ~1.1M params, roughly 10x cheaper.
-    "small": {"width": 16, "enc": [1, 1, 1, 2], "middle": 1, "dec": [1, 1, 1, 1]},
-    # What the original Nano can actually sustain. ~0.3M params.
-    "nano": {"width": 16, "enc": [1, 1, 1], "middle": 1, "dec": [1, 1, 1]},
-    # Shapes used by the published NAFNet releases, for fine-tuning from
-    # their SIDD weights (real sensor noise). ~29M params - roughly 100x the
-    # nano model, so crop-only on a Jetson Nano and far too slow for whole
-    # frames. Confirm against the source repo's config before relying on it;
-    # training/pretrained.py infers the real shape from the checkpoint.
-    "sidd": {"width": 32, "enc": [2, 2, 4, 8], "middle": 12, "dec": [2, 2, 2, 2]},
-}
+TILE_SIZE = 128
+TILE_OVERLAP = 32
 
 # --- Stage 2: YOLOv8 person detection -------------------------------------
 # Three backends, picked by file extension:
@@ -202,7 +174,6 @@ PROFILES = {
     "nano": {
         "TILE_SIZE": 128,
         "TILE_OVERLAP": 32,
-        "NAFNET_ARCH": "nano",
         "DENOISE_BACKEND": "classical",
         "DENOISE_PROFILE": "balanced",   # +3.6 dB, ~7 ms/crop on this board
         "DENOISE_SCOPE": "crop",
@@ -212,14 +183,12 @@ PROFILES = {
         "YOLO_MAX_SUBJECTS": 2,
         "DETECT_EVERY_N": 1,
         "CAPTURE_FPS": 30,
-        "TRT_PRECISION": "fp16",     # Maxwell has no INT8 path
         "POWER_BUDGET_W": 10.0,      # MAXN mode on a 5V/4A barrel supply
     },
     # Xavier NX / AGX: INT8 and DLA available.
     "xavier": {
         "TILE_SIZE": 256,
         "TILE_OVERLAP": 64,
-        "NAFNET_ARCH": "small",
         "DENOISE_BACKEND": "classical",
         "DENOISE_PROFILE": "quality",
         "DENOISE_SCOPE": "crop",
@@ -229,14 +198,12 @@ PROFILES = {
         "YOLO_MAX_SUBJECTS": 3,
         "DETECT_EVERY_N": 1,
         "CAPTURE_FPS": 30,
-        "TRT_PRECISION": "int8",
         "POWER_BUDGET_W": 15.0,
     },
     # Orin Nano / NX.
     "orin": {
         "TILE_SIZE": 256,
         "TILE_OVERLAP": 128,
-        "NAFNET_ARCH": "base",
         "DENOISE_BACKEND": "classical",
         "DENOISE_PROFILE": "quality",
         "DENOISE_SCOPE": "crop",
@@ -246,14 +213,12 @@ PROFILES = {
         "YOLO_MAX_SUBJECTS": 3,
         "DETECT_EVERY_N": 1,
         "CAPTURE_FPS": 30,
-        "TRT_PRECISION": "int8",
         "POWER_BUDGET_W": 15.0,
     },
     # Development machine: no constraints worth modelling.
     "workstation": {
         "TILE_SIZE": 256,
         "TILE_OVERLAP": 128,
-        "NAFNET_ARCH": "base",
         "DENOISE_BACKEND": "classical",
         "DENOISE_PROFILE": "quality",
         "DENOISE_SCOPE": "crop",
@@ -263,7 +228,6 @@ PROFILES = {
         "YOLO_MAX_SUBJECTS": 3,
         "DETECT_EVERY_N": 1,
         "CAPTURE_FPS": 30,
-        "TRT_PRECISION": "fp16",
         "POWER_BUDGET_W": 0.0,
     },
 }
@@ -301,19 +265,13 @@ def apply_profile(name=None):
     PROFILE = name
     globals().update(settings)
 
-    arch = NAFNET_ARCHS.get(settings.get("NAFNET_ARCH", "base"), NAFNET_ARCHS["base"])
-    globals().update({
-        "NAFNET_WIDTH": arch["width"],
-        "NAFNET_ENC_BLKS": arch["enc"],
-        "NAFNET_MIDDLE_BLKS": arch["middle"],
-        "NAFNET_DEC_BLKS": arch["dec"],
-    })
-
     # Environment variables still win, so a profile never traps you.
-    if "EDGE_DENOISE_SCOPE" in os.environ:
-        globals()["DENOISE_SCOPE"] = os.environ["EDGE_DENOISE_SCOPE"]
-    if "EDGE_RESTORE_MODE" in os.environ:
-        globals()["RESTORE_MODE"] = os.environ["EDGE_RESTORE_MODE"]
+    for env_name, setting in (("EDGE_DENOISE_SCOPE", "DENOISE_SCOPE"),
+                              ("EDGE_DENOISE_PROFILE", "DENOISE_PROFILE"),
+                              ("EDGE_DENOISE_BACKEND", "DENOISE_BACKEND"),
+                              ("EDGE_RESTORE_MODE", "RESTORE_MODE")):
+        if env_name in os.environ:
+            globals()[setting] = os.environ[env_name]
     return settings
 
 

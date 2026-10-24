@@ -288,13 +288,19 @@ def benchmark_engine(engine_path: Path, tile: int, batch: int, iters: int = 50) 
 
 
 def main():
-    ap = argparse.ArgumentParser(description="ONNX -> TensorRT engine")
-    ap.add_argument("--onnx", type=Path, default=config.NAFNET_ONNX)
-    ap.add_argument("--out", type=Path, default=config.NAFNET_ENGINE)
-    ap.add_argument("--precision", default=config.TRT_PRECISION,
+    ap = argparse.ArgumentParser(
+        description="ONNX -> TensorRT engine. Stage 1 is classical and needs "
+                    "no model, so the graphs worth converting here are "
+                    "YOLOv8 (stage 2) and ArcFace (stage 4).")
+    ap.add_argument("--onnx", type=Path, required=True,
+                    help="e.g. models/yolov8n.onnx or models/arcface_w600k_r50.onnx")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="defaults to the input path with a .engine suffix")
+    ap.add_argument("--precision", default="fp16",
                     choices=["fp32", "fp16", "int8"],
-                    help="defaults to the hardware profile (fp16 on a Jetson Nano)")
-    ap.add_argument("--tile", type=int, default=config.TILE_SIZE)
+                    help="fp16 is the floor on a Jetson Nano; Maxwell has no INT8")
+    ap.add_argument("--tile", type=int, default=config.TILE_SIZE,
+                    help="input side length for the optimization profile")
     ap.add_argument("--opt_batch", type=int, default=1)
     ap.add_argument("--max_batch", type=int, default=4)
     # 4 GB shared memory on a Nano; a 2 GiB workspace will fail to allocate.
@@ -309,7 +315,12 @@ def main():
     args = ap.parse_args()
 
     if not Path(args.onnx).exists():
-        raise SystemExit(f"ONNX model not found: {args.onnx}. Run export/export_onnx.py first.")
+        raise SystemExit(
+            f"ONNX model not found: {args.onnx}. For YOLOv8, produce one with "
+            "export/export_yolo.py --format onnx on a workstation."
+        )
+    if args.out is None:
+        args.out = Path(args.onnx).with_suffix(".engine")
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
 
     engine_path = build_with_trtexec(args) if args.trtexec else build_engine(args)

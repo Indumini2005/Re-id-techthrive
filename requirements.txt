@@ -1,47 +1,37 @@
-# ---------------------------------------------------------------------------
-# Core (needed everywhere)
-# ---------------------------------------------------------------------------
-# NOTE: basicsr/gfpgan (stage 3) are unmaintained and break on numpy>=2.
-# If you install everything in one environment, pin numpy<2. If you want a
-# modern numpy for training, keep stage 3 in its own venv - see README.
-numpy>=1.24,<2.0
-opencv-python>=4.8.0          # use opencv-python-headless on a headless Jetson
-tqdm>=4.65
+# Workstation. There is no training step in this project, so there is no
+# PyTorch here either. The only thing this environment exists for is the
+# one-off YOLOv8 -> ONNX export, because ultralytics cannot be installed on
+# the Nano's Python 3.6.
+#
+# For the device itself, see requirements-jetson.txt.
 
-# ---------------------------------------------------------------------------
-# Training the denoiser (workstation / Colab, not the Jetson)
-#   CUDA builds: pip install torch --index-url https://download.pytorch.org/whl/cu121
-# ---------------------------------------------------------------------------
-torch>=2.0.0
-torchvision>=0.15.0
-
-# ---------------------------------------------------------------------------
-# Export
-# ---------------------------------------------------------------------------
+numpy>=1.24
+opencv-python>=4.8.0
 onnx>=1.14.0
-onnxsim>=0.4.33               # optional: --simplify
-onnxconverter-common>=1.14    # optional: --fp16
-
-# ---------------------------------------------------------------------------
-# Inference
-#   Desktop CPU  : onnxruntime
-#   Desktop CUDA : onnxruntime-gpu
-#   Jetson       : the JetPack onnxruntime-gpu wheel from NVIDIA, NOT PyPI
-# ---------------------------------------------------------------------------
 onnxruntime>=1.16.0
 
-# Stage 2
+# YOLOv8 export only. Pulls in torch as its own dependency; that is the
+# exporter's requirement, not this project's, and none of it ships to the
+# Jetson.
 ultralytics>=8.1.0
-
-# Stage 3
-gfpgan>=1.3.8
-basicsr>=1.4.2
-facexlib>=0.3.0
-
-# Stage 5
-faiss-cpu>=1.7.4              # faiss-gpu if you have the CUDA build
+onnxsim>=0.4.33
 
 # ---------------------------------------------------------------------------
-# TensorRT (Jetson only - ships with JetPack, do not pip install it)
-# pycuda>=2022.2               # needed only for INT8 calibration
+# Optional - stage 3 (GFPGAN face restoration)
+#
+# Needs Python 3.10 or 3.11; basicsr is unmaintained and will not build on
+# 3.12+. It also requires numpy<2, and imports
+# torchvision.transforms.functional_tensor, removed in torchvision 0.17 - so
+# either pin torchvision<0.17 or patch that one import.
+#
+# Stage 3 is optional at runtime and the pipeline degrades to a passthrough
+# without it, so install this only if you intend to use face restoration.
 # ---------------------------------------------------------------------------
+# gfpgan>=1.3.8
+# basicsr>=1.4.2
+# facexlib>=0.3.0
+
+# Stage 5. The pipeline falls back to an exact numpy inner-product index
+# automatically, which is fine well past the few thousand vectors a
+# watchlist holds.
+faiss-cpu>=1.7.4
