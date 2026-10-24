@@ -47,7 +47,7 @@ ALERT_COLOR = (0, 0, 255)
 class Stages:
     """Loads each model once, tolerating missing weights."""
 
-    def __init__(self, enable: dict):
+    def __init__(self, enable: dict, args=None):
         self.denoiser = self.detector = self.restorer = None
         self.embedder = self.index = None
         self.enabled = dict(enable)
@@ -55,8 +55,13 @@ class Stages:
         if self.enabled.get("denoise"):
             try:
                 from pipeline.stage1_denoise import get_denoiser
-                self.denoiser = get_denoiser()
-                print("[stage1] NAFNet denoiser ready")
+                self.denoiser = get_denoiser(
+                    backend=getattr(args, "denoise_backend", None),
+                    profile=getattr(args, "denoise_profile", None),
+                )
+                print("[stage1] restorer ready: %s" % (
+                    self.denoiser.describe() if hasattr(self.denoiser, "describe")
+                    else "neural"))
             except Exception as exc:
                 print(f"[stage1] disabled: {exc}")
                 self.enabled["denoise"] = False
@@ -243,7 +248,8 @@ def run(args):
             "detect": not args.no_detect,
             "restore": not args.no_restore,
             "match": not args.no_match,
-        }
+        },
+        args=args,
     )
 
     fusion = CrossViewFusion(
@@ -454,7 +460,13 @@ def parse_args():
 
     # --- stages
     p.add_argument("--denoise_scope", default=config.DENOISE_SCOPE, choices=["frame", "crop"],
-                   help="denoise the whole frame, or detect first and denoise the crop")
+                   help="crop is the designed path; frame is kept only for an A/B")
+    p.add_argument("--denoise_backend", default=config.DENOISE_BACKEND,
+                   choices=["classical", "neural", "none"],
+                   help="classical needs no model and runs in a few ms per crop")
+    p.add_argument("--denoise_profile", default=config.DENOISE_PROFILE,
+                   choices=["off", "fast", "balanced", "quality"],
+                   help="classical backend only; see pipeline/denoise_classical.py")
     p.add_argument("--process_width", type=int, default=config.PROCESS_WIDTH,
                    help="downscale frames to this width before inference; 0 disables")
     p.add_argument("--restore_mode", default=config.RESTORE_MODE,

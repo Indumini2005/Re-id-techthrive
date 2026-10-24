@@ -101,8 +101,13 @@ class Stages:
         if not args.no_denoise:
             try:
                 from pipeline.stage1_denoise import get_denoiser
-                self.denoiser = get_denoiser()
-                print("  stage1 denoise  : ready")
+                self.denoiser = get_denoiser(
+                    backend=getattr(args, "denoise_backend", None),
+                    profile=getattr(args, "denoise_profile", None),
+                )
+                print("  stage1 denoise  : ready (%s)" % (
+                    self.denoiser.describe() if hasattr(self.denoiser, "describe")
+                    else "neural"))
             except Exception as exc:
                 print("  stage1 denoise  : off (%s)" % exc)
 
@@ -244,6 +249,10 @@ def main():
     ap.add_argument("--thumb_quality", type=int, default=65)
 
     ap.add_argument("--denoise_scope", default=config.DENOISE_SCOPE, choices=["frame", "crop"])
+    ap.add_argument("--denoise_backend", default=config.DENOISE_BACKEND,
+                    choices=["classical", "neural", "none"])
+    ap.add_argument("--denoise_profile", default=config.DENOISE_PROFILE,
+                    choices=["off", "fast", "balanced", "quality"])
     ap.add_argument("--restore_mode", default=config.RESTORE_MODE,
                     choices=["always", "escalate", "never"])
     ap.add_argument("--escalate_above", type=float, default=config.ESCALATE_ABOVE)

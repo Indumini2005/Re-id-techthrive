@@ -30,6 +30,73 @@ gallery query.
 
 ---
 
+## Stage 1 is classical, and crop-only
+
+No model, no training, no weights file. A 3×3 median followed by a bilateral
+filter, applied to the **person crop** rather than the frame.
+
+Both halves of that decision are what make the system fit on this board:
+
+**Crop, not frame.** Detection tolerates noise; recognition does not. Only
+the region that feeds ArcFace needs restoring, which cuts stage-1 work by
+one to two orders of magnitude.
+
+**Classical, not neural.** Measured on 96×192 crops against the CCTV
+degradation chain (`python bench_denoise.py`):
+
+| | gain | ms/crop (Nano est.) |
+|---|---|---|
+| `fast` — median3 | +4.7 dB | **0.9 ms** |
+| `balanced` — median3 + bilateral d7 | +6.8 dB | 7.9 ms |
+| `quality` — median3 + bilateral d9 | +7.0 dB | 13.4 ms |
+| non-local means (best config) | +2.5 dB | 126 ms |
+| NAFNet-SIDD, 128px tile | — | 57 ms |
+
+The default is `balanced`: ~32 ms per inference cycle for two cameras and two
+subjects each, leaving the frame budget to detection.
+
+Two results worth knowing, because both contradict the obvious design:
+
+**A 3×3 median does most of the work** — +4.7 dB for under a millisecond.
+That isn't luck: the degradation chain ends in JPEG, and impulse-like block
+artifacts are exactly what a median removes and what a Gaussian-assuming
+filter smears. It runs first so those artifacts don't corrupt the bilateral
+filter's range weights.
+
+**Non-local means is not worth it here.** It's the textbook answer and it
+lost: less gain than a median for 140× the cost.
+
+### CLAHE and sharpening are off
+
+Both are implemented and both are disabled. Measured against the clean
+reference, CLAHE costs 7.5 dB raw and still 2.2 dB after matching
+first-order statistics — so it isn't just the intended tone change, it
+degrades structure. Unsharp masking costs a further 1.0 dB by re-amplifying
+residual noise.
+
+They're kept because illumination normalisation is standard for face
+embedding under uneven lighting, and enrolment runs the same pipeline so
+gallery and query stay consistent. That argument is plausible but
+**unverified** — confirming it needs ArcFace match rates on real faces, not
+PSNR. Until someone measures that, the default is the setting that
+demonstrably preserves the image:
+
+```powershell
+python bench_denoise.py          # shipped profiles, including the +clahe A/B
+python bench_denoise.py --sweep  # the filter comparison above
+```
+
+Run it **on the Jetson** for real numbers; elsewhere it prints a scaled
+estimate and says so.
+
+### The neural path still exists
+
+`--denoise_backend neural` uses an exported NAFNet graph, and `training/`
+still trains one. Neither is on the critical path any more — nothing in the
+default configuration needs a model file for stage 1.
+
+---
+
 ## Hardware reality
 
 Run `python3 check_device.py` on the board. Summary of what the original

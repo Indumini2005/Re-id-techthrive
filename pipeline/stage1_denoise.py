@@ -1,9 +1,18 @@
-"""Stage 1 - NAFNet frame denoising (ONNX Runtime / TensorRT).
+"""Stage 1 - crop restoration.
 
-The model is fully convolutional, so it can run either on the whole frame in
-one pass or on overlapping tiles. Tiling keeps peak memory flat regardless of
-the camera resolution, which is what makes 1080p viable inside the Jetson's
-power budget.
+Two backends behind one interface:
+
+* **classical** (default) - median plus bilateral, in denoise_classical.py.
+  No model, no training, a few milliseconds per crop.
+* **neural** - an exported NAFNet graph under ONNX Runtime or TensorRT.
+  Kept for machines that can afford it; it is not viable on a Jetson Nano
+  at any useful rate.
+
+The pipeline denoises *person crops*, not whole frames. Detection tolerates
+noise; recognition does not. Restricting the work to the region that feeds
+ArcFace cuts the pixel count by one to two orders of magnitude and is what
+makes the whole system fit on a 128-core Maxwell GPU. The tiling machinery
+below exists for the neural path, which still needs it on larger inputs.
 """
 
 import threading
@@ -117,17 +126,48 @@ class Denoiser:
 
 
 # -- module-level singleton, so the pipeline loop can just call a function ---
-_denoiser: Optional[Denoiser] = None
+_denoiser = None
 _denoiser_lock = threading.Lock()
 
 
-def get_denoiser(**kwargs) -> Denoiser:
+def get_denoiser(**kwargs):
+    """Stage-1 singleton, classical or neural per ``config.DENOISE_BACKEND``.
+
+    Both expose ``.denoise(bgr) -> bgr``, so nothing downstream changes when
+    the backend does. The default is classical: on a 128-core Maxwell it
+    recovers most of the available quality for a few milliseconds per crop,
+    against hundreds for any network worth running.
+    """
     global _denoiser
-    if _denoiser is None:
-        with _denoiser_lock:
-            if _denoiser is None:
-                _denoiser = Denoiser(**kwargs)
+    if _denoiser is not None:
+        return _denoiser
+
+    with _denoiser_lock:
+        if _denoiser is not None:
+            return _denoiser
+
+        backend = kwargs.pop("backend", None) or config.DENOISE_BACKEND
+        if backend == "classical":
+            from .denoise_classical import ClassicalDenoiser
+            _denoiser = ClassicalDenoiser(
+                profile=kwargs.pop("profile", config.DENOISE_PROFILE),
+                adaptive=kwargs.pop("adaptive", True),
+                clahe=kwargs.pop("clahe", None),
+                sharpen=kwargs.pop("sharpen", None),
+            )
+        elif backend == "none":
+            from .denoise_classical import ClassicalDenoiser
+            _denoiser = ClassicalDenoiser(profile="off")
+        else:
+            _denoiser = Denoiser(**kwargs)
     return _denoiser
+
+
+def reset_denoiser():
+    """Drop the singleton, so a different backend can be selected."""
+    global _denoiser
+    with _denoiser_lock:
+        _denoiser = None
 
 
 def denoise_frame(img_bgr: np.ndarray) -> np.ndarray:

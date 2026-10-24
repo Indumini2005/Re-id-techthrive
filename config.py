@@ -34,7 +34,22 @@ CAPTURE_DIR = ROOT / "captures"   # frames saved on a positive match
 for _d in (MODELS_DIR, DATA_DIR, RUNS_DIR, DB_DIR, CAPTURE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
-# --- Stage 1: NAFNet denoiser ---------------------------------------------
+# --- Stage 1: crop restoration --------------------------------------------
+# "classical" needs no model and no training: a 3x3 median followed by a
+# bilateral filter. Measured against the CCTV degradation chain on 96x192
+# crops it recovers +3.6 dB for ~7 ms per crop on a Nano, where the cheapest
+# network worth running costs ~57 ms per 128px tile. On this hardware that
+# is not a close call.
+#
+# "neural" uses an exported NAFNet graph; see pipeline/stage1_denoise.py.
+# "none" disables stage 1 entirely, for measuring what it contributes.
+DENOISE_BACKEND = os.environ.get("EDGE_DENOISE_BACKEND", "classical")
+
+# off | fast | balanced | quality. See pipeline/denoise_classical.py for the
+# measurements behind each.
+DENOISE_PROFILE = os.environ.get("EDGE_DENOISE_PROFILE", "balanced")
+
+# --- Stage 1 (neural backend only) ----------------------------------------
 NAFNET_ONNX = MODELS_DIR / "nafnet.onnx"
 NAFNET_ENGINE = MODELS_DIR / "nafnet.engine"
 NAFNET_CKPT = MODELS_DIR / "nafnet.pth"
@@ -162,10 +177,12 @@ RTSP_LATENCY_MS = 200
 DENOISE_EVERY_N = 1
 DETECT_EVERY_N = 2
 
-# "frame" denoises the whole frame (matches the architecture diagram);
-# "crop" detects first and denoises only the person crop. Detection tolerates
-# noise, recognition does not, so "crop" costs little accuracy and saves most
-# of the work - mandatory on a first-generation Nano.
+# Crop-scope only. Detection runs on the raw frame and only the person box
+# is restored, which is the architecture this project settled on: it cuts
+# stage-1 work by one to two orders of magnitude for no measurable loss,
+# because detection tolerates noise and only recognition needs the detail.
+# "frame" remains selectable for an A/B, but nothing is tuned for it and it
+# is not viable on a Nano.
 DENOISE_SCOPE = os.environ.get("EDGE_DENOISE_SCOPE", "crop")
 
 # Downscale each frame before any inference. The Nano cannot process 1080p
@@ -186,6 +203,8 @@ PROFILES = {
         "TILE_SIZE": 128,
         "TILE_OVERLAP": 32,
         "NAFNET_ARCH": "nano",
+        "DENOISE_BACKEND": "classical",
+        "DENOISE_PROFILE": "balanced",   # +3.6 dB, ~7 ms/crop on this board
         "DENOISE_SCOPE": "crop",
         "PROCESS_WIDTH": 640,
         "RESTORE_MODE": "escalate",
@@ -201,6 +220,8 @@ PROFILES = {
         "TILE_SIZE": 256,
         "TILE_OVERLAP": 64,
         "NAFNET_ARCH": "small",
+        "DENOISE_BACKEND": "classical",
+        "DENOISE_PROFILE": "quality",
         "DENOISE_SCOPE": "crop",
         "PROCESS_WIDTH": 1280,
         "RESTORE_MODE": "escalate",
@@ -216,7 +237,9 @@ PROFILES = {
         "TILE_SIZE": 256,
         "TILE_OVERLAP": 128,
         "NAFNET_ARCH": "base",
-        "DENOISE_SCOPE": "frame",
+        "DENOISE_BACKEND": "classical",
+        "DENOISE_PROFILE": "quality",
+        "DENOISE_SCOPE": "crop",
         "PROCESS_WIDTH": 0,
         "RESTORE_MODE": "always",
         "YOLO_IMGSZ": 640,
@@ -231,7 +254,9 @@ PROFILES = {
         "TILE_SIZE": 256,
         "TILE_OVERLAP": 128,
         "NAFNET_ARCH": "base",
-        "DENOISE_SCOPE": "frame",
+        "DENOISE_BACKEND": "classical",
+        "DENOISE_PROFILE": "quality",
+        "DENOISE_SCOPE": "crop",
         "PROCESS_WIDTH": 0,
         "RESTORE_MODE": "always",
         "YOLO_IMGSZ": 640,
