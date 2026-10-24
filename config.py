@@ -60,6 +60,12 @@ NAFNET_ARCHS = {
     "small": {"width": 16, "enc": [1, 1, 1, 2], "middle": 1, "dec": [1, 1, 1, 1]},
     # What the original Nano can actually sustain. ~0.3M params.
     "nano": {"width": 16, "enc": [1, 1, 1], "middle": 1, "dec": [1, 1, 1]},
+    # Shapes used by the published NAFNet releases, for fine-tuning from
+    # their SIDD weights (real sensor noise). ~29M params - roughly 100x the
+    # nano model, so crop-only on a Jetson Nano and far too slow for whole
+    # frames. Confirm against the source repo's config before relying on it;
+    # training/pretrained.py infers the real shape from the checkpoint.
+    "sidd": {"width": 32, "enc": [2, 2, 4, 8], "middle": 12, "dec": [2, 2, 2, 2]},
 }
 
 # --- Stage 2: YOLOv8 person detection -------------------------------------
