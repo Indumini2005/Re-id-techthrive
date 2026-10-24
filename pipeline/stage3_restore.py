@@ -1,8 +1,28 @@
-"""Stage 3 - GFPGAN facial reconstruction.
+"""Stage 3 - GFPGAN facial reconstruction. Optional, and often unavailable.
 
 GFPGAN detects and aligns the face inside the YOLO crop (via facexlib), then
-hallucinates high-frequency detail that the CCTV sensor never recorded. The
-output is a 512x512 aligned face, which is exactly what ArcFace wants.
+hallucinates high-frequency detail the CCTV sensor never recorded. The
+output is a 512x512 aligned face, which is what ArcFace wants.
+
+Two practical constraints, both of which usually decide the matter before
+quality does:
+
+**It will not install on a Jetson Nano.** gfpgan and basicsr both require
+Python 3.7+, and JetPack 4.6 - the final release for that board - ships
+3.6.9. Short of building a newer Python from source or exporting the model
+to ONNX on another machine, stage 3 simply cannot run there.
+
+**Its cost does not scale with the crop.** The face is aligned to a fixed
+512x512 before the StyleGAN2 decoder runs, so a 40-pixel face costs the same
+as a 400-pixel one. That is the opposite of stage 1, where restricting work
+to the crop is what made the budget. There is no equivalent saving here: the
+only lever is how often it runs, which is what ``--restore_mode escalate``
+controls.
+
+The pipeline degrades cleanly without it - ``prepare_face`` in
+pipeline/stage1_denoise.py pads and Lanczos-resamples the crop to 112x112,
+which is what ArcFace consumes either way. Measure recognition with and
+without before assuming stage 3 is required.
 """
 
 import threading
@@ -23,7 +43,23 @@ class FaceRestorer:
         channel_multiplier: int = config.GFPGAN_CHANNEL_MULTIPLIER,
         device: Optional[str] = None,
     ):
-        from gfpgan import GFPGANer
+        import sys
+
+        try:
+            from gfpgan import GFPGANer
+        except ImportError as exc:
+            if sys.version_info < (3, 7):
+                raise ImportError(
+                    "gfpgan requires Python 3.7+ and this is %d.%d. On JetPack "
+                    "4.6 that cannot be fixed with pip - stage 3 is unavailable "
+                    "on this board. Run with --restore_mode never; the pipeline "
+                    "feeds ArcFace the Lanczos-resampled crop instead."
+                    % sys.version_info[:2]
+                )
+            raise ImportError(
+                "gfpgan is not installed (%s). Stage 3 is optional; "
+                "--restore_mode never skips it." % exc
+            )
 
         model_path = Path(model_path or config.GFPGAN_WEIGHTS)
         if not model_path.exists():

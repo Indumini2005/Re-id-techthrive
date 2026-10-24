@@ -177,6 +177,7 @@ with `EDGE_PROFILE`. The `nano` profile sets 128px tiles, 32px overlap, the
 |---|---|
 | `config.py` | Every path, threshold and runtime switch, plus hardware profiles. Start here. |
 | `check_device.py` | Probe the board: GPU, memory, INT8/DLA support, what will actually run. |
+| `check_py36.py` | Fails loudly if device-side code uses post-3.6 syntax. |
 | `hub/server.py` | Hub: pairs nodes, fuses, matches, serves the dashboard. |
 | `hub/static/dashboard.html` | The operator UI. |
 | `hub/protocol.py` | Node↔hub wire format and clock-offset correction. |
@@ -223,19 +224,32 @@ workstation role.
 
 ### Jetson Nano
 
-JetPack 4.6, Python 3.6. Install the **NVIDIA JetPack wheels** for
-`onnxruntime-gpu` — the PyPI version has no CUDA support for aarch64.
-TensorRT and `pycuda` come from JetPack itself.
+**Use the Python 3.6.9 that JetPack 4.6 already ships. Do not install a
+newer one.** It looks like an upgrade and is not:
+
+| Installing 3.8+ loses | Why it matters |
+|---|---|
+| `python3-opencv` from apt | Built for 3.6 with CUDA **and GStreamer**. The RTSP capture needs GStreamer. Rebuilding OpenCV from source on a Nano takes hours. |
+| NVIDIA's `onnxruntime-gpu` wheel | Published as `cp36` for JetPack 4.6. A cp38 build means community wheels and more risk. |
+
+Every device-side file in this repo is written to import on 3.6 —
+`python check_py36.py` verifies it, and is worth running before you copy
+anything across. The only thing 3.6 costs you is GFPGAN (stage 3), which
+this board cannot run at a useful speed regardless.
 
 ```bash
 sudo apt install python3-opencv libopenblas-dev
 pip3 install -r requirements-jetson.txt
-# onnxruntime-gpu: NVIDIA's JetPack 4.6 wheel, not PyPI
+
+# onnxruntime-gpu: NVIDIA's JetPack 4.6 cp36 wheel from the Jetson Zoo,
+# not PyPI — the PyPI build has no CUDA for aarch64.
+pip3 install onnxruntime_gpu-*-cp36-cp36m-linux_aarch64.whl
+
 python3 check_device.py
 ```
 
 Do **not** try to install `ultralytics` or `gfpgan` here; both require
-Python 3.8+. Stage 2 runs from ONNX instead, and stage 3 is optional.
+Python 3.7+. Stage 2 runs from ONNX instead, and stage 3 is optional.
 
 ### Models to copy into `models/`
 

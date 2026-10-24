@@ -200,15 +200,30 @@ def main():
     crop = subjects[0].crop if subjects else frame[h // 4 : h, w // 3 : 2 * w // 3]
 
     # --- Stage 3 -----------------------------------------------------------
+    # Unlike stage 1, this cost does NOT scale with the crop. GFPGAN aligns
+    # the face and works at a fixed 512x512 internally, so a 40px face and a
+    # 400px one cost the same. The per-face figure is the whole story.
     face = None
     try:
         from pipeline.stage3_restore import get_restorer
 
         restorer = get_restorer()
         face, stats = timed(restorer.restore, crop, warmup=1, iters=max(3, args.iters // 2))
+        stats["per_face"] = True
         report["stages"]["3_restore"] = stats
         print(f"3 restore  : {stats['mean']:7.2f} ms  (p95 {stats['p95']:.2f})  "
               f"{'face found' if face is not None else 'no face in the crop'}")
+
+        # What that figure means for the loop, which is the decision it drives.
+        faces = args.cameras * 2
+        always = stats["mean"] * faces
+        print(f"             always : {always:8.0f} ms/cycle for {faces} faces "
+              f"-> {1000.0 / always:.2f} pairs/s" if always else "")
+        print(f"             escalate: pays it only on candidates; most cycles "
+              f"skip stage 3 entirely")
+        if stats["mean"] > 400:
+            print("             ^ too slow for a live loop. Use "
+                  "--restore_mode never, or escalate if the gallery is small.")
     except Exception as exc:
         print(f"3 restore  : skipped ({exc})")
 
