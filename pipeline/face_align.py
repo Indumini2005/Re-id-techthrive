@@ -87,12 +87,16 @@ def distance2kps(points, distance):
 class SCRFDetector:
     """insightface's SCRFD face detector under ONNX Runtime."""
 
-    def __init__(self, model_path=None, input_size=640, conf=0.4, iou=0.4,
-                 provider=None):
+    def __init__(self, model_path=None, input_size=None, conf=0.4, iou=0.4,
+                 provider=None, min_size=None):
         import onnxruntime as ort
         from pathlib import Path
 
         self.model_path = Path(model_path or config.FACE_DETECT_ONNX)
+        if input_size is None:
+            input_size = getattr(config, "FACE_DETECT_SIZE", 640)
+        if min_size is None:
+            min_size = getattr(config, "FACE_DETECT_MIN", 128)
         if not self.model_path.exists():
             raise FileNotFoundError(
                 "Face detector not found at %s. It ships in the insightface "
@@ -104,6 +108,11 @@ class SCRFDetector:
 
         opts = ort.SessionOptions()
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        # det_10g ships with its output shapes pinned to a 640 input even
+        # though the input itself is dynamic, so running at any other size
+        # logs a stale shape-mismatch warning for each of the nine outputs.
+        # The values are correct; only the metadata is wrong.
+        opts.log_severity_level = 3
         self.session = ort.InferenceSession(
             str(self.model_path), sess_options=opts,
             providers=config.provider_list(provider),
@@ -112,6 +121,10 @@ class SCRFDetector:
         shape = self.session.get_inputs()[0].shape
         static = shape[2] if isinstance(shape[2], int) else None
         self.input_size = static or input_size
+        # A statically-shaped export has no choice of size; a dynamic one
+        # should match the image rather than upscale it to 640.
+        self.dynamic = static is None
+        self.min_size = min(min_size, self.input_size)
 
         self.conf, self.iou = conf, iou
         self._lock = threading.Lock()
@@ -130,13 +143,28 @@ class SCRFDetector:
                 "det_2.5g.onnx." % (self.model_path.name, n_out)
             )
 
-    def detect(self, image_bgr):
+    def _choose_size(self, h, w):
+        """Smallest multiple of 32 that holds the image without upscaling.
+
+        Cost scales with the square of this, and upscaling an already-cropped
+        subject adds no detail - so a 96x192 crop is detected at 192, not at
+        the 640 the model is distributed for. Clamped below because SCRFD
+        needs a face to be roughly 16 px at the network input to find it.
+        """
+        if not self.dynamic:
+            return self.input_size
+        longest = max(int(h), int(w))
+        size = ((longest + 31) // 32) * 32
+        return max(self.min_size, min(self.input_size, size))
+
+    def detect(self, image_bgr, size=None):
         """-> list of (box, score, landmarks) in input-image coordinates."""
         if image_bgr is None or image_bgr.size == 0:
             return []
 
         h, w = image_bgr.shape[:2]
-        size = self.input_size
+        if size is None:
+            size = self._choose_size(h, w)
         scale = min(size / float(h), size / float(w))
         nh, nw = int(round(h * scale)), int(round(w * scale))
 
@@ -207,12 +235,18 @@ class SCRFDetector:
 
 
 def centre_crop_face(crop_bgr, size=112):
-    """Fallback when no detector model is available.
+    """Fallback when no detector model is available. Off by default.
 
     Assumes a standing person fills the crop and the head occupies the top
     ~28% of it. Preserves aspect ratio, which the plain resize in stage 4
-    does not. This is a stopgap - it does not align, so ArcFace accuracy
-    will be well below what SCRFD gives.
+    does not.
+
+    Read config.FACE_ALLOW_FALLBACK before relying on this. It is not a
+    lower-accuracy version of alignment: ArcFace maps inputs that are not
+    properly aligned faces into one region of its embedding space, where
+    they resemble each other far more than the match thresholds allow. An
+    unaligned crop therefore yields a confident wrong identification rather
+    than no identification.
     """
     if crop_bgr is None or crop_bgr.size == 0:
         return None
@@ -245,7 +279,7 @@ def get_face_detector(**kwargs):
     return _detector
 
 
-def prepare_for_embedding(crop_bgr, size=112, denoiser=None, allow_fallback=True):
+def prepare_for_embedding(crop_bgr, size=112, denoiser=None, allow_fallback=None):
     """Person crop -> aligned face ready for ArcFace, or None.
 
     Restores first, then detects: the detector sees the cleaned crop, which
@@ -255,6 +289,8 @@ def prepare_for_embedding(crop_bgr, size=112, denoiser=None, allow_fallback=True
 
     if crop_bgr is None or crop_bgr.size == 0:
         return None
+    if allow_fallback is None:
+        allow_fallback = getattr(config, "FACE_ALLOW_FALLBACK", False)
 
     working = denoiser.denoise(crop_bgr) if denoiser is not None else crop_bgr
 
@@ -267,7 +303,15 @@ def prepare_for_embedding(crop_bgr, size=112, denoiser=None, allow_fallback=True
         except Exception as exc:
             _detector_failed = True
             print("[face] detector unavailable (%s)" % exc)
-            print("[face] falling back to an unaligned centre crop; "
-                  "recognition accuracy will be materially worse")
+            if allow_fallback:
+                print("[face] FACE_ALLOW_FALLBACK is on: embedding unaligned "
+                      "centre crops. Unaligned faces land close together in "
+                      "ArcFace space, so expect confident WRONG matches, not "
+                      "just misses. Identifications from here are not "
+                      "trustworthy.")
+            else:
+                print("[face] refusing to embed without alignment; no "
+                      "identifications will be made. Install det_10g.onnx, "
+                      "or set FACE_ALLOW_FALLBACK = True to run degraded.")
 
     return centre_crop_face(working, size) if allow_fallback else None

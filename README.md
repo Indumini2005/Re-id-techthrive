@@ -165,9 +165,38 @@ runs on plausible candidates. Alerts mark which embeddings were escalated.
 
 `config.py` carries per-board profiles (`nano`, `xavier`, `orin`,
 `workstation`), auto-selected from `/proc/device-tree/model` and overridable
-with `EDGE_PROFILE`. The `nano` profile sets 128px tiles, 32px overlap, the
-`nano` model architecture, `--denoise_scope crop`, 640px processing width,
-`--restore_mode escalate`, YOLO at 416px and FP16-only TensorRT.
+with `EDGE_PROFILE`. The `nano` profile sets the `balanced` denoise profile,
+`--denoise_scope crop`, 640px processing width, `--restore_mode escalate`,
+YOLO at 416px, at most 2 subjects per frame, and FP16-only TensorRT.
+
+### Stage 3b is sized to the crop, not to the model's default
+
+SCRFD is distributed for 640×640 — finding every face in a full frame. Here
+it is handed a single person crop that YOLO has already localised, so 640
+would mean upscaling a ~96×192 crop by 3.3× and paying for the area. Cost
+goes as the square of the input, and `det_10g.onnx` takes a dynamic one, so
+the detector picks its size per image instead (rounded up to a multiple of
+32, so the stride-32 level divides evenly).
+
+Measured on one laptop CPU, `det_10g.onnx` at each size:
+
+| Input | Anchors | Cost | vs 640 |
+|---|---|---|---|
+| 640 | 16800 | 56.0 ms | 1.0× |
+| 320 | 4200 | 14.0 ms | 4.0× |
+| **192** | **1512** | **5.5 ms** | **10.2×** |
+| 128 | 672 | 2.8 ms | 20.0× |
+
+192 is where a 96×192 crop needs no resampling at all, and it leaves the head
+region about 54 px — comfortably above the ~16 px SCRFD needs at its
+stride-8 level. Varying the shape per call is free: mixed sizes measured
+5.64 ms/call against 5.71 ms for a fixed 192, and a never-before-seen shape
+cost nothing extra.
+
+`FACE_DETECT_SIZE` (640) is now the ceiling, used for full frames during
+enrolment; `FACE_DETECT_MIN` (128) is the floor, because below it small faces
+start to disappear. On the same laptop this took the whole per-person path
+from 116.6 ms to 64.6 ms for one subject, and 433 ms to 225 ms for four.
 
 ---
 
@@ -178,6 +207,8 @@ with `EDGE_PROFILE`. The `nano` profile sets 128px tiles, 32px overlap, the
 | `config.py` | Every path, threshold and runtime switch, plus hardware profiles. Start here. |
 | `check_device.py` | Probe the board: GPU, memory, INT8/DLA support, what will actually run. |
 | `check_py36.py` | Fails loudly if device-side code uses post-3.6 syntax. |
+| `check_models.py` | Loads the three ONNX graphs, checks them against what the code assumes, times them. |
+| `tests/run_all.py` | Runs the eight suites below. No model files, no camera needed. |
 | `hub/server.py` | Hub: pairs nodes, fuses, matches, serves the dashboard. |
 | `hub/static/dashboard.html` | The operator UI. |
 | `hub/protocol.py` | Node↔hub wire format and clock-offset correction. |
@@ -191,6 +222,7 @@ with `EDGE_PROFILE`. The `nano` profile sets 128px tiles, 32px overlap, the
 | `pipeline/fusion.py` | Cross-view association and multi-angle identification. |
 | `pipeline/stage1_denoise.py` | Classical crop restoration: median + bilateral, OpenCV only. |
 | `pipeline/stage2_detect.py` | YOLOv8 person detection and cropping. |
+| `pipeline/face_align.py` | Stage 3b: SCRFD face detection and the similarity warp ArcFace needs. |
 | `pipeline/stage3_restore.py` | GFPGAN face reconstruction. |
 | `pipeline/stage4_embed.py` | ArcFace 512-D embeddings. |
 | `pipeline/stage5_match.py` | FAISS index, persistence, cosine matching. |
@@ -201,6 +233,39 @@ with `EDGE_PROFILE`. The `nano` profile sets 128px tiles, 32px overlap, the
 
 `yolocropping.py`, `gpfgan.py` and `arcface_faiss.py` are thin shims kept so
 the original imports still resolve.
+
+---
+
+## Tests
+
+```powershell
+python tests/run_all.py
+```
+
+No model files, no camera, no GPU — so these run on the Nano as soon as
+Python and OpenCV are up, which makes them the way to tell a broken install
+from a broken camera. They cover the places where a mistake produces
+plausible-looking output instead of an error:
+
+| Suite | What would otherwise pass silently |
+|---|---|
+| `test_align.py` | A warp that is subtly wrong yields a normal-looking face and a useless embedding. Asserts landmarks land on the reference to 0.00 px, that the transform has no shear, and that SCRFD box/landmark decoding is exact. |
+| `test_yolo_onnx.py` | Letterbox padding not undone — boxes land near the subject, so the crop looks fine and is wrong. |
+| `test_sync.py` | Frame pairing drift: a stale anchor can make one camera permanently consume the other's frames. |
+| `test_fusion.py` | Two people merged into one track, or one person split across two. |
+| `test_hub.py` | A fresh observation fused with a minutes-old frame from a dead node. |
+| `test_index.py` | Gallery persistence and cosine matching across save/reload. |
+| `test_escalate.py` | GFPGAN invoked when it should not be, or skipped when it should not be. |
+| `test_imports.py` | Every module imports — catches a rename that only breaks at runtime. |
+
+Each suite is a standalone script that exits non-zero on failure, so
+`run_all.py` runs them as subprocesses: several stub `cv2` or `onnxruntime`
+to stay runnable without them, and those stubs must not leak into the next
+suite.
+
+`check_models.py` is the complement — the suites pass on a machine where
+nothing can actually run, and that check is what tells you the graphs are
+present, loadable and shaped as the code assumes.
 
 ---
 
@@ -253,20 +318,52 @@ Python 3.7+. Stage 2 runs from ONNX instead, and stage 3 is optional.
 
 ### Models to copy into `models/`
 
-| File | Source | Needed for |
-|---|---|---|
-| `yolov8n.onnx` | `export/export_yolo.py --format onnx --imgsz 416` | **stage 2, required** |
-| `det_10g.onnx` | insightface `buffalo_l` pack | **face alignment, required** |
-| `arcface_w600k_r50.onnx` | insightface `buffalo_l` pack | **stage 4, required** |
-| `GFPGANv1.3.pth` | TencentARC/GFPGAN releases | stage 3, optional — won't install on the Nano |
+| File in `models/` | Source | Name in the download | Needed for |
+|---|---|---|---|
+| `yolov8n.onnx` | `export/export_yolo.py --format onnx --imgsz 416` | same | **stage 2, required** |
+| `det_10g.onnx` | insightface `buffalo_l` pack | same | **stage 3b, required** |
+| `arcface_w600k_r50.onnx` | insightface `buffalo_l` pack | `w600k_r50.onnx` | **stage 4, required** |
+| `GFPGANv1.3.pth` | TencentARC/GFPGAN releases | same | stage 3, optional — won't install on the Nano |
 
-`det_10g.onnx` and `arcface_w600k_r50.onnx` come from the **same** download,
-so that is one archive, not two.
+`det_10g.onnx` and the ArcFace model come from the **same** archive, so that
+is one download, not two. Note the third row: the pack calls that file
+`w600k_r50.onnx`, and it has to be **renamed** on the way in.
 
-**Face alignment is not optional.** ArcFace is trained on faces warped so
-five landmarks sit at fixed pixel positions. Without the detector the
-pipeline falls back to an unaligned centre crop and says so — it keeps
-running, but recognition accuracy drops a long way.
+```powershell
+Copy-Item buffalo_l\det_10g.onnx   models\det_10g.onnx
+Copy-Item buffalo_l\w600k_r50.onnx models\arcface_w600k_r50.onnx
+```
+
+The pack also contains `1k3d68.onnx`, `2d106det.onnx` and `genderage.onnx`
+— 3D landmarks, dense landmarks and attribute estimation. This pipeline uses
+none of them, and `1k3d68.onnx` alone is 137 MB, so leave them out of
+`models/` rather than loading three graphs that are never called.
+
+Then confirm all three are actually usable:
+
+```powershell
+python check_models.py
+```
+
+That checks more than existence: that ONNX Runtime will build a session,
+which provider it really gets (CUDA or a silent fall back to CPU), that
+SCRFD emits the 9 outputs / 3 feature levels / 2 anchors-per-stride that
+`pipeline/face_align.py` hard-codes, that ArcFace is 512-D, and what each
+stage costs on that machine.
+
+**Face alignment is not optional, and it fails in a way worth
+understanding.** ArcFace does not give a low score for an input that is not
+a properly aligned face — it maps such inputs into one region of its
+embedding space. Measured on `arcface_w600k_r50.onnx`, six unrelated
+non-face inputs had pairwise cosine similarity **0.85–0.94**, against a
+gallery threshold of 0.65 and a cross-view threshold of 0.45. So an
+unaligned crop does not fail to match; it matches other unaligned crops,
+confidently and wrongly.
+
+That is why `config.FACE_ALLOW_FALLBACK` defaults to `False`. Without
+`det_10g.onnx` the pipeline refuses to embed and makes no identifications,
+rather than making bad ones. Set it `True` only to demonstrate the rest of
+the pipeline, never to judge accuracy.
 
 **Stage 1 needs no model file.** That is the point of the classical
 pipeline: two of the four stages ship as code, not weights.

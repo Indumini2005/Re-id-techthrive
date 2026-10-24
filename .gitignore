@@ -12,12 +12,28 @@ models/*.pt
 models/trt_cache/
 *.calib
 
+# The same formats anywhere else, because exporters and downloaders drop
+# them in the working directory: ultralytics writes yolov8n.pt/.onnx beside
+# the script, and the insightface pack is ~340 MB extracted.
+*.onnx
+*.onnx.data
+*.pt
+*.pth
+*.engine
+buffalo_*.zip
+buffalo_*/
+
 # Generated data
 data/
 runs/
 captures/
 vector_db/
 degradation_preview.png
+
+# Scratch databases the suites create next to themselves
+tests/db_test/
+tests/fuse_test/
+tests/hub_db/
 
 .vscode/
 .idea/

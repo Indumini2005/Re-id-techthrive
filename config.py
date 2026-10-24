@@ -92,11 +92,36 @@ ESCALATE_ABOVE = 0.40
 # degrade gracefully - the embedding ends up describing clothing and pose.
 #
 # SCRFD ships in the same insightface buffalo_l pack as the ArcFace model,
-# so this costs one extra file (~2.5 MB) and no new runtime.
+# so this costs one extra file (16 MB) and no new runtime.
 FACE_DETECT_ONNX = MODELS_DIR / "det_10g.onnx"
-FACE_DETECT_SIZE = 640          # SCRFD input; 320 is faster and misses more
 FACE_DETECT_CONF = 0.4
 FACE_DETECT_IOU = 0.4
+
+# det_10g takes a dynamic input, and cost scales with its area: measured on
+# one laptop CPU, 640 costs 56.0 ms and 192 costs 5.5 ms - 10.2x - because
+# anchor count falls from 16800 to 1512.
+#
+# 640 is the right size for finding every face in a full frame, which is what
+# enrolment does. It is the wrong size for a person crop: YOLO has already
+# localised the subject, so a ~96x192 crop would be UPSCALED 3.3x to fill it,
+# buying no information. The detector therefore picks its size per image,
+# rounded up to a multiple of 32 so the stride-32 level divides evenly.
+# Varying the shape per call is free - mixed sizes measured 5.64 ms/call
+# against 5.71 ms for a fixed 192.
+FACE_DETECT_SIZE = 640          # upper bound, used for full frames
+FACE_DETECT_MIN = 128           # floor; below this small faces start to go
+
+# What to do when det_10g.onnx is absent: centre-crop the top of the person
+# box and embed that unaligned, or refuse to embed at all.
+#
+# This defaults to off because of how ArcFace fails. It does not return a low
+# score for an input that is not a properly aligned face - it maps such
+# inputs into one region of the embedding space. Measured on this model, six
+# unrelated non-face inputs had pairwise cosine similarity 0.85-0.94, against
+# a gallery threshold of 0.65 and a cross-view threshold of 0.45. So a
+# fallback crop that misses the face does not fail to match; it matches other
+# such crops confidently. For an identification system, no answer is better.
+FACE_ALLOW_FALLBACK = False
 
 # --- Stage 4: ArcFace embedding -------------------------------------------
 ARCFACE_ONNX = MODELS_DIR / "arcface_w600k_r50.onnx"
