@@ -201,7 +201,8 @@ arbitrary, since that may be the one smeared by motion or the encoder.
 
 **Frame selection** (`FRAME_SELECT = "sharpest"`, `--frame_select`). Each
 camera thread scores every frame as it arrives: variance of the Laplacian
-on a 160 px-wide grey copy, ~1.8 ms for a 1080p frame on a laptop, off the
+on a 160 px-wide copy of the green channel, ~4 ms for a 1080p frame on the
+Nano itself, off the
 main loop. The pairer then takes the best of the frames that arrived since
 its last decision:
 

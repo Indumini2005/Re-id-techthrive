@@ -88,7 +88,10 @@ t0 = time.perf_counter()
 for _ in range(50):
     frame_sharpness(big)
 ms = (time.perf_counter() - t0) / 50 * 1000
-check("cheap enough for every frame", ms < 5.0, "%.2f ms per 1080p frame" % ms)
+# Budget, set for the Jetson Nano (the slowest target): 8 ms x 30 fps is
+# under a quarter of one CPU core per camera. Measured there: 4.0 ms. The
+# earlier full-colour version took 23 ms - 70% of a core per camera.
+check("cheap enough for every frame", ms < 8.0, "%.2f ms per 1080p frame" % ms)
 
 # ===========================================================================
 # Face quality

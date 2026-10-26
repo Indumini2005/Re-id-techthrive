@@ -22,8 +22,9 @@ import threading
 import time
 import webbrowser
 from collections import deque
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from socketserver import ThreadingMixIn
 
 import numpy as np
 
@@ -42,6 +43,16 @@ from pipeline.fusion import CrossViewFusion, ViewObservation  # noqa: E402
 from pipeline.vectors import cosine  # noqa: E402
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    """http.server.ThreadingHTTPServer, which only exists from Python 3.7.
+
+    Built here from the same two parts so the hub also runs on the Nano's
+    Python 3.6. One thread per request, so a held-open SSE stream does not
+    block the nodes posting observations.
+    """
+    daemon_threads = True
 
 # Pairing tolerance for the distributed case. Nodes report a few times per
 # second over a LAN, not at camera frame rate, so this is much wider than

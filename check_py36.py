@@ -39,6 +39,7 @@ LATE_STDLIB = {
     ("functools", "cache"): "3.9",
     ("functools", "cached_property"): "3.8",
     ("contextlib", "nullcontext"): "3.7",
+    ("http.server", "ThreadingHTTPServer"): "3.7",
     ("datetime", "fromisoformat"): "3.7",
     ("importlib", "metadata"): "3.8",
     ("typing", "Protocol"): "3.8",
@@ -99,6 +100,14 @@ class Checker(ast.NodeVisitor):
         if node.module == "dataclasses":
             self.flag(node, "dataclasses needs the backport on 3.6 "
                             "(pip install dataclasses) - not an error, a reminder")
+        # `from module import name` must be checked too, not just
+        # `module.name(...)` calls - `from http.server import
+        # ThreadingHTTPServer` passed this check and failed on the Nano.
+        for alias in node.names:
+            key = (node.module, alias.name)
+            if key in LATE_STDLIB and LATE_STDLIB[key]:
+                self.flag(node, "from %s import %s (%s+)"
+                          % (key[0], key[1], LATE_STDLIB[key]))
         self.generic_visit(node)
 
     def visit_Import(self, node):

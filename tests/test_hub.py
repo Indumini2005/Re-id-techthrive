@@ -22,8 +22,7 @@ TMP = Path(__file__).parent / "hub_db"
 TMP.mkdir(exist_ok=True)
 
 from hub.protocol import build_observation, encode_vector  # noqa: E402
-from hub.server import Handler, Hub  # noqa: E402
-from http.server import ThreadingHTTPServer  # noqa: E402
+from hub.server import Handler, Hub, ThreadingHTTPServer  # noqa: E402
 from pipeline.stage5_match import ThreatIndex  # noqa: E402
 from pipeline.vectors import l2_normalize  # noqa: E402
 
