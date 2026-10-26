@@ -69,7 +69,16 @@ Invoke-WithRetry "unpack" {
     # -m: stamp files with the Nano's own time. Its clock has no battery and
     # resets when unplugged, so laptop timestamps look years in the future
     # and tar would warn about every file.
-    ssh -o ConnectTimeout=45 $SshHost "mkdir -p ~/$RemoteDir/models && tar -xmf /tmp/jetson_sync.tar -C ~/$RemoteDir && rm -f /tmp/jetson_sync.tar && chmod +x ~/$RemoteDir/*.sh 2>/dev/null; echo unpacked"
+    # Then strip the CRLF line endings Windows gives the working tree: the
+    # Nano's copy is a git checkout, and CRLF would show every text file as
+    # modified and block `git pull`. grep -I skips binary files.
+    # Built from single-quoted pieces because PowerShell 5.1 drops embedded
+    # double quotes when it passes an argument to ssh.
+    $unpack = 'mkdir -p ~/' + $RemoteDir + '/models && tar -xmf /tmp/jetson_sync.tar -C ~/' + $RemoteDir +
+              ' && cd ~/' + $RemoteDir +
+              ' && tar -tf /tmp/jetson_sync.tar | xargs -d ''\n'' grep -IlP ''\r'' 2>/dev/null | xargs -r -d ''\n'' sed -i ''s/\r$//''' +
+              '; rm -f /tmp/jetson_sync.tar; chmod +x *.sh 2>/dev/null; echo unpacked'
+    ssh -o ConnectTimeout=45 $SshHost $unpack
 }
 Remove-Item $tar, $list -Force
 
