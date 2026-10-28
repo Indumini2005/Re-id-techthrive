@@ -62,7 +62,15 @@ YOLO_CONF = 0.5
 YOLO_IOU = 0.45
 YOLO_PERSON_CLASS = 0          # COCO 'person'
 YOLO_CROP_MARGIN = 0.05        # 5% context padding around the box
-YOLO_MAX_SUBJECTS = 3          # subjects tracked per frame
+# People given face recognition per camera per cycle - the budget for the
+# expensive stages (face detection, alignment, ArcFace). Not a limit on who
+# is tracked: with analytics on, everyone up to TRACK_MAX_PEOPLE is tracked
+# (cheap), and this many of them get recognised each cycle, those who need
+# it most first. Capping detections at this number instead made people drop
+# in and out of the results whenever more were in view, which reset their
+# IDs and dwell times.
+YOLO_MAX_SUBJECTS = 3
+TRACK_MAX_PEOPLE = 20
 
 # --- Stage 3: GFPGAN face restoration -------------------------------------
 GFPGAN_WEIGHTS = MODELS_DIR / "GFPGANv1.3.pth"
@@ -187,6 +195,42 @@ CROSS_VIEW_THRESHOLD = 0.45
 FUSION_MODE = "mean"           # mean | max | first
 REQUIRE_VIEW_AGREEMENT = False # both views must independently name the same ID
 REQUIRE_BOTH_VIEWS = False     # suppress alerts seen by only one camera
+
+# --- Tracking and scene analytics ------------------------------------------
+# See pipeline/tracker.py, pipeline/analytics.py and the README section
+# "Exhibition features".
+#
+# Per-camera tracker. A track survives this long without a detection,
+# coasting on its Kalman prediction, before it is dropped. At the ~3 frame
+# pairs per second the Nano manages, 2 s is about six missed cycles.
+TRACK_MAX_AGE_S = 2.0
+TRACK_MIN_HITS = 2             # detections before a track counts as confirmed
+
+# Track-then-recognise. A tracked person whose identity is settled is not
+# re-embedded every cycle; ArcFace (122 ms per face on the Nano GPU) runs
+# again only after this long, or sooner if the track crosses another person.
+# 0 restores the old behaviour of embedding every face every cycle.
+TRACK_EMBED_REFRESH_S = 2.0
+# After a crop yields no usable face (none found, too small, turned away),
+# wait this long before running face detection on that track again.
+TRACK_FACE_RETRY_S = 1.0
+
+# Re-identifying people who were never enrolled ("Visitor #N"). Kept in
+# memory only and forgotten after VISITOR_TTL_S without a sighting.
+# The threshold is a live-vs-live comparison, like the cross-view one.
+VISITOR_THRESHOLD = 0.45
+VISITOR_MARGIN = 0.05          # how much better another visitor must score to take over
+VISITOR_TTL_S = 600.0
+VISITOR_RETURN_GAP_S = 5.0     # unseen this long, then seen again = "returned"
+
+# Journeys: a sighting gap longer than this ends a visit to a camera.
+VISIT_GAP_S = 3.0
+TRANSIT_MAX_S = 180.0          # longer camera-to-camera gaps are not "walks"
+LOITER_SECONDS = 30.0          # continuous presence that raises a loitering alert
+
+# Score -> probability calibration written by calibrate.py. Without it the
+# UI shows raw similarity scores and says so; it never invents a percentage.
+CALIBRATION_FILE = DB_DIR / "calibration.json"
 
 # --- Runtime ---------------------------------------------------------------
 # "tensorrt" | "cuda" | "cpu".  Picked up by every ONNX stage.

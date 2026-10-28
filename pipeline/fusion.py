@@ -44,6 +44,11 @@ class ViewObservation:
     escalated: bool = False
     # Filled in by identify(); the per-view gallery hit, for diagnostics.
     solo_match: Optional[Match] = None
+    # The tracker's track for this person (pipeline/tracker.py), and whether
+    # the embedding was reused from that track instead of computed this
+    # cycle (track-then-recognise; see SceneAnalytics.should_check_face).
+    track: Optional[object] = None
+    cached: bool = False
 
     @property
     def usable(self) -> bool:

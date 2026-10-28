@@ -18,12 +18,21 @@ show the same person, then fused into a single gallery query.
     python main_pipeline.py                                   # config.CAMERAS
     python main_pipeline.py --source rtsp://.../a --source rtsp://.../b
     python main_pipeline.py --source CAM_A=a.mp4 --source CAM_B=b.mp4 --no_gstreamer
+    python main_pipeline.py --dashboard 8765 --headless       # serve the web UI
 
-Everything runs locally; nothing is transmitted off the node.
+On top of identification, pipeline/analytics.py tracks every person with a
+Kalman filter, re-identifies strangers as "Visitor #N", records each
+person's journey between the cameras, predicts where they will appear next,
+and measures dwell time and loitering. With --dashboard the board also
+serves the web UI, so any laptop or phone on the same network can watch it.
+
+Everything runs locally; nothing is transmitted off the local network.
 """
 
 import argparse
+import threading
 import time
+from collections import deque
 from datetime import datetime
 from typing import Dict, List
 
@@ -31,9 +40,10 @@ import cv2
 import numpy as np
 
 import config
+from pipeline.analytics import SceneAnalytics, fused_track_payload
 from pipeline.fusion import CrossViewFusion, ViewObservation
 from pipeline.sources import SyncedCapture, cameras_from_args, gstreamer_pipeline  # noqa: F401
-from pipeline.utils import StageTimer, downscale, draw_box, draw_hud
+from pipeline.utils import StageTimer, downscale, draw_box, draw_hud, draw_scene_view
 
 # One colour per track, reused across both views so the operator can see at a
 # glance which box in CAM_A corresponds to which box in CAM_B.
@@ -92,17 +102,31 @@ class Stages:
                 self.enabled["match"] = False
 
 
+def wall_time(monotonic_ts: float) -> float:
+    """Frame timestamps are time.monotonic(); analytics and the UI work in
+    wall-clock seconds."""
+    return time.time() - (time.monotonic() - monotonic_ts)
+
+
 def process_view(
     frame_bgr: np.ndarray,
     camera: str,
     stages: Stages,
     timer: StageTimer,
     args,
+    analytics: SceneAnalytics = None,
+    t_wall: float = None,
+    face_thumbs: bool = False,
 ) -> tuple:
     """Runs stages 1-4 on one camera's frame.
 
     Returns ``(observations, display_frame)``. The display frame is the
     denoised one when ``--show_denoised`` is set, otherwise the raw capture.
+
+    With ``analytics``, every detection is matched to a tracked person
+    first, and the expensive part - crop denoise, face detection, ArcFace -
+    runs only when that person's identity needs (re)checking. Otherwise the
+    track's recent embedding is reused (``obs.cached``).
     """
     frame_bgr = downscale(frame_bgr, args.process_width)
     working = frame_bgr
@@ -116,28 +140,47 @@ def process_view(
             display = working.copy()
 
     # --- Stage 2 ----------------------------------------------------------
+    # With tracking, detect everyone (cheap) and ration only the face work
+    # below; without it, the old largest-N cap applies to both.
     subjects = []
     if stages.detector:
         with timer(f"detect:{camera}"):
-            subjects = stages.detector.detect(working, max_subjects=args.max_subjects)
+            limit = config.TRACK_MAX_PEOPLE if analytics is not None else args.max_subjects
+            subjects = stages.detector.detect(working, max_subjects=limit)
+
+    tracks = [None] * len(subjects)
+    check = set(range(len(subjects)))
+    if analytics is not None:
+        h, w = frame_bgr.shape[:2]
+        tracks = analytics.track(camera, t_wall, [s.box for s in subjects],
+                                 [s.conf for s in subjects], (w, h))
+        check = analytics.select_face_checks(tracks, t_wall, budget=args.max_subjects)
 
     observations: List[ViewObservation] = []
-    for subject in subjects:
-        crop = subject.crop
-
-        # --- Stage 1 (crop mode) -----------------------------------------
-        # Detection ran on the noisy frame; only the crop gets cleaned up,
-        # which is where recognition actually needs the detail.
-        if stages.denoiser and args.denoise_scope == "crop":
-            with timer(f"denoise:{camera}"):
-                crop = stages.denoiser.denoise(crop)
-
+    for i, (subject, trk) in enumerate(zip(subjects, tracks)):
         obs = ViewObservation(
-            camera=camera, box=subject.box, conf=subject.conf, crop=crop
+            camera=camera, box=subject.box, conf=subject.conf, crop=subject.crop, track=trk
         )
 
-        # --- Stages 3 + 4 -------------------------------------------------
-        _restore_and_embed(obs, camera, stages, timer, args)
+        if i in check:
+            # --- Stage 1 (crop mode) -------------------------------------
+            # Detection ran on the noisy frame; only the crop gets cleaned
+            # up, which is where recognition actually needs the detail.
+            if stages.denoiser and args.denoise_scope == "crop":
+                with timer(f"denoise:{camera}"):
+                    obs.crop = stages.denoiser.denoise(obs.crop)
+
+            # --- Stages 3 + 4 ---------------------------------------------
+            _restore_and_embed(obs, camera, stages, timer, args)
+            if trk is not None:
+                thumb = None
+                if face_thumbs and obs.embedding is not None and obs.face is not None:
+                    from hub.protocol import encode_jpeg
+                    thumb = encode_jpeg(obs.face, quality=72, max_width=96)
+                analytics.face_result(trk, t_wall, embedding=obs.embedding, thumb=thumb)
+
+        if trk is not None and obs.embedding is None:
+            obs.embedding, obs.cached = SceneAnalytics.embedding_for(trk)
         observations.append(obs)
 
     return observations, display
@@ -236,6 +279,28 @@ def compose_display(views: Dict[str, np.ndarray], height: int = 540) -> np.ndarr
     return np.hstack(panels) if panels else np.zeros((height, height, 3), np.uint8)
 
 
+def _node_rows(pair, by_camera, cap_stats, timer, pair_count):
+    """Per-camera status rows in the hub's 'nodes' shape, for the dashboard."""
+    summary = timer.summary()
+    shared = {k: v for k, v in summary.items() if ":" not in k}
+    rows = []
+    for i, name in enumerate(sorted(pair.frames)):
+        stages_ms = {k.split(":")[0]: v for k, v in summary.items() if k.endswith(":" + name)}
+        if i == 0:
+            stages_ms.update(shared)
+        rows.append({
+            "name": name,
+            "online": True,
+            "fps": round(cap_stats["capture_fps"].get(name, 0.0), 1),
+            "frames": pair_count,
+            "stages_ms": stages_ms,
+            "clock_offset_ms": 0.0,
+            "last_seen_ago": 0.0,
+            "subjects": len(by_camera.get(name, [])),
+        })
+    return rows
+
+
 def run(args):
     cameras = cameras_from_args(args.source, codec=args.codec)
     capture = SyncedCapture(
@@ -274,11 +339,42 @@ def run(args):
         require_both_views=args.require_both_views,
     )
 
+    # Tracking, visitors, journeys, predictions, loitering. The dashboard
+    # is built on it, so it cannot be switched off while serving one.
+    analytics = None
+    if not args.no_analytics or args.dashboard:
+        analytics = SceneAnalytics(
+            embed_refresh_s=args.embed_refresh,
+            visitor_threshold=args.visitor_threshold,
+            loiter_s=args.loiter_seconds,
+        )
+        cal = analytics.calibrator
+        print("[analytics] tracking on | visitor threshold %.2f | loitering after %.0f s | "
+              "re-embed every %.1f s | confidence: %s"
+              % (args.visitor_threshold, args.loiter_seconds, args.embed_refresh,
+                 "calibrated (%s pairs)" % (cal.data.get("n_genuine", 0) + cal.data.get("n_impostor", 0))
+                 if cal.calibrated else "uncalibrated - run calibrate.py; raw scores shown"))
+
+    hub = None
+    alerts = deque(maxlen=100)
+    if args.dashboard:
+        from hub.server import Handler, Hub, ThreadingHTTPServer, compose_result, local_ip
+        hub = Hub(fusion=fusion, analytics=analytics, index=stages.index)
+        alerts = hub.alerts
+        Handler.hub = hub
+        server = ThreadingHTTPServer(("0.0.0.0", args.dashboard), Handler)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, name="dashboard", daemon=True).start()
+        print("[dashboard] open http://%s:%d/ on any device on this network"
+              % (local_ip(), args.dashboard))
+    started = time.time()
+
     timer = StageTimer(window=20)
-    pair_count = alerts = 0
+    pair_count = alert_count = 0
     last_alert_time: dict = {}
     infer_fps_ema = 0.0
     last_tracks = []
+    t_now = time.time()
 
     # Report the mode that will actually be used, not the one requested.
     # _restore_and_embed degrades to "never" when no restorer loaded - via
@@ -307,13 +403,18 @@ def run(args):
                 continue
             pair_count += 1
 
-            displays = {name: f.image for name, f in pair.frames.items()}
+            displays = {name: downscale(f.image, args.process_width)
+                        for name, f in pair.frames.items()}
             run_inference = pair_count % args.detect_every == 0
 
             if run_inference:
                 by_camera: Dict[str, List[ViewObservation]] = {}
+                t_now = max(wall_time(f.timestamp) for f in pair.frames.values())
                 for name, frame in pair.frames.items():
-                    observations, display = process_view(frame.image, name, stages, timer, args)
+                    t_cam = wall_time(frame.timestamp)
+                    observations, display = process_view(
+                        frame.image, name, stages, timer, args,
+                        analytics=analytics, t_wall=t_cam, face_thumbs=hub is not None)
                     by_camera[name] = observations
                     displays[name] = display
 
@@ -322,16 +423,39 @@ def run(args):
                     tracks = fusion.process(by_camera)
                 last_tracks = tracks
 
+                events = []
+                if analytics is not None:
+                    with timer("analytics"):
+                        events = analytics.resolve(t_now, tracks)
+                    for ev in events:
+                        print(f"[{ev['at']}] {ev['text']}")
+                        if ev.get("kind") == "loiter":
+                            alerts.append({
+                                "at": ev["at"], "kind": "loiter",
+                                "identity": ev["text"].split(" has been")[0],
+                                "camera": ev.get("camera"), "text": ev["text"],
+                                "score": None, "cross_view": None,
+                                "cameras": [ev.get("camera")], "multiview": False,
+                                "agreement": False})
+
+                # The dashboard draws its own overlay, so it gets the frames
+                # before anything is drawn on them.
+                if hub is not None:
+                    from hub.protocol import encode_jpeg
+                    frames_b64 = {n: encode_jpeg(img, quality=60, max_width=args.thumb_width)
+                                  for n, img in displays.items()}
+
                 for t_idx, track in enumerate(tracks):
                     color = TRACK_COLORS[t_idx % len(TRACK_COLORS)]
                     matched = track.match is not None and track.match.is_match
                     if matched:
                         color = ALERT_COLOR
 
-                    for obs in track.observations:
-                        if obs.camera in displays:
-                            draw_box(displays[obs.camera], obs.box,
-                                     f"T{t_idx} {track.label()}", color)
+                    if analytics is None:
+                        for obs in track.observations:
+                            if obs.camera in displays:
+                                draw_box(displays[obs.camera], obs.box,
+                                         f"T{t_idx} {track.label()}", color)
 
                     if not matched:
                         continue
@@ -341,12 +465,21 @@ def run(args):
                     if now - last_alert_time.get(identity, 0) < args.alert_cooldown:
                         continue
                     last_alert_time[identity] = now
-                    alerts += 1
+                    alert_count += 1
 
                     stamp = datetime.now().strftime("%H:%M:%S")
                     views = "+".join(track.cameras)
+                    conf = analytics.calibrator.probability(track.match.score) if analytics else None
+                    alerts.append({
+                        "at": stamp, "kind": "match", "identity": identity,
+                        "score": round(track.match.score, 4), "confidence": conf,
+                        "cross_view": round(track.cross_view_score, 4),
+                        "cameras": track.cameras, "multiview": track.is_multiview,
+                        "agreement": track.agreement})
                     print(f"\n[!] {stamp}  THREAT MATCH: {identity} "
-                          f"(fused cosine {track.match.score:.3f}, views {views})")
+                          f"(fused cosine {track.match.score:.3f}"
+                          + (f", {100 * conf:.0f}% confidence" if conf is not None else "")
+                          + f", views {views})")
                     if track.is_multiview:
                         print(f"    cross-view similarity {track.cross_view_score:.3f} "
                               f"| views agree: {track.agreement}")
@@ -376,15 +509,47 @@ def run(args):
                         face = track.best_face
                         if face is not None:
                             cv2.imshow("Human Verification Required", face)
+
+                if analytics is not None:
+                    for name in displays:
+                        draw_scene_view(displays[name], analytics.view_state(name, t_now))
+
+                if hub is not None:
+                    cap_stats = capture.stats()
+                    multiview = [t for t in tracks if t.is_multiview]
+                    similarity = max((t.cross_view_score for t in multiview), default=None)
+                    hub.publish(compose_result(
+                        started=started,
+                        cameras=pair.frames.keys(),
+                        skew_ms=pair.skew_ms,
+                        in_sync=pair.in_sync,
+                        similarity=similarity,
+                        track_payloads=[fused_track_payload(t, analytics.calibrator) for t in tracks],
+                        nodes=_node_rows(pair, by_camera, cap_stats, timer, pair_count),
+                        frames=frames_b64,
+                        settings=hub.settings,
+                        gallery=stages.index.stats() if stages.index else None,
+                        stats={"pairs": pair_count, "skewed": cap_stats["skewed"],
+                               "alerts": len(alerts)},
+                        alerts=alerts,
+                        scene=analytics.state(t_now),
+                    ))
             else:
-                # Carry the previous boxes forward so the display does not flicker.
-                for t_idx, track in enumerate(last_tracks):
-                    matched = track.match is not None and track.match.is_match
-                    color = ALERT_COLOR if matched else TRACK_COLORS[t_idx % len(TRACK_COLORS)]
-                    for obs in track.observations:
-                        if obs.camera in displays:
-                            draw_box(displays[obs.camera], obs.box,
-                                     f"T{t_idx} {track.label()}", color)
+                # Between detections: move every box to where the Kalman
+                # filter says that person is now, instead of freezing it.
+                for name, frame in pair.frames.items():
+                    if analytics is not None:
+                        t_frame = wall_time(frame.timestamp)
+                        draw_scene_view(displays[name],
+                                        analytics.view_state(name, t_frame, at=t_frame))
+                    else:
+                        for t_idx, track in enumerate(last_tracks):
+                            matched = track.match is not None and track.match.is_match
+                            color = ALERT_COLOR if matched else TRACK_COLORS[t_idx % len(TRACK_COLORS)]
+                            for obs in track.observations:
+                                if obs.camera == name:
+                                    draw_box(displays[name], obs.box,
+                                             f"T{t_idx} {track.label()}", color)
 
             # --- HUD ----------------------------------------------------
             loop_ms = (time.perf_counter() - loop_start) * 1000
@@ -400,8 +565,17 @@ def run(args):
                 f"capture {cap_fps} fps   inference {infer_fps_ema:5.1f} fps   sync {sync_tag}",
                 "  ".join(f"{k} {v:.0f}ms" for k, v in timer.summary().items()) or "warming up",
                 f"tracks {len(last_tracks)} ({multiview} multi-view)   "
-                f"alerts {alerts}   skipped {cap_stats['skipped_frames']}",
+                f"alerts {alert_count}   skipped {cap_stats['skipped_frames']}",
             ]
+            if analytics is not None:
+                ps = analytics.journeys.prediction_stats()
+                eff = analytics.efficiency()
+                decided = ps["hits"] + ps["misses"]
+                hud.append(
+                    f"visitors {len(analytics.visitors)} (seen {analytics.visitors.created})   "
+                    f"predictions {ps['hits']}/{decided} correct, {ps['pending']} pending   "
+                    + (f"face work skipped {eff['skipped_pct']:.0f}%"
+                       if eff and eff["skipped_pct"] is not None else ""))
 
             canvas = compose_display(displays, height=args.display_height)
             draw_hud(canvas, hud)
@@ -444,9 +618,25 @@ def run(args):
         print(f"faces                 : {q['accepted']} embedded, "
               f"{q['too_small']} too small, {q['turned_away']} turned away, "
               f"{q['no_face']} crops with no face")
+        if analytics is not None:
+            st = analytics.state(t_now)
+            eff, ps = st["efficiency"], st["predictions"]
+            print(f"face work (tracking)  : {eff['faces_embedded']} faces embedded, "
+                  f"{eff['faces_reused']} reused from a track, "
+                  f"{eff['face_checks_skipped']} retries deferred"
+                  + (f" -> {eff['skipped_pct']:.0f}% of face checks skipped"
+                     if eff["skipped_pct"] is not None else ""))
+            print(f"visitors              : {analytics.visitors.created} seen, "
+                  f"{len(analytics.visitors)} still remembered "
+                  f"(forgotten after {analytics.visitors.ttl_s:.0f} s)")
+            print(f"predictions           : {ps['made']} made, {ps['hits']} correct, "
+                  f"{ps['misses']} wrong" + (f" ({100 * ps['accuracy']:.0f}%)"
+                                             if ps["accuracy"] is not None else ""))
+            print(f"loitering alerts      : "
+                  f"{sum(1 for e in analytics.events if e['kind'] == 'loiter')}")
         print(f"pairs out of sync     : {stats['skewed']}")
         print(f"reconnects            : {stats['reconnects']}")
-        print(f"alerts raised         : {alerts}")
+        print(f"alerts raised         : {alert_count}")
         print(f"mean stage ms         : {timer.summary()}")
         print("resources freed. air-gapped compliance maintained.")
 
@@ -497,7 +687,9 @@ def parse_args():
                    help="when to spend time on GFPGAN (escalate = only on candidates)")
     p.add_argument("--escalate_above", type=float, default=config.ESCALATE_ABOVE,
                    help="preliminary cosine above which escalate mode restores the face")
-    p.add_argument("--max_subjects", type=int, default=config.YOLO_MAX_SUBJECTS)
+    p.add_argument("--max_subjects", type=int, default=config.YOLO_MAX_SUBJECTS,
+                   help="people given face recognition per camera per cycle; everyone "
+                        "up to config.TRACK_MAX_PEOPLE is still tracked")
     p.add_argument("--frame_select", default=config.FRAME_SELECT,
                    choices=["sharpest", "newest"],
                    help="which of the frames that arrived during the last "
@@ -510,7 +702,23 @@ def parse_args():
     p.add_argument("--no_restore", action="store_true")
     p.add_argument("--no_match", action="store_true")
 
+    # --- tracking and scene analytics (pipeline/analytics.py)
+    p.add_argument("--no_analytics", action="store_true",
+                   help="no tracking, visitors, journeys, predictions or loitering")
+    p.add_argument("--embed_refresh", type=float, default=config.TRACK_EMBED_REFRESH_S,
+                   help="seconds before a tracked, identified person's face is "
+                        "re-embedded; 0 = every cycle (the old behaviour)")
+    p.add_argument("--visitor_threshold", type=float, default=config.VISITOR_THRESHOLD,
+                   help="similarity to recognise an unenrolled visitor again")
+    p.add_argument("--loiter_seconds", type=float, default=config.LOITER_SECONDS,
+                   help="continuous presence that raises a loitering alert")
+
     # --- display
+    p.add_argument("--dashboard", type=int, default=0, metavar="PORT",
+                   help="serve the web dashboard on this port (e.g. 8765); "
+                        "open http://<this-device-ip>:PORT/ from any device on the network")
+    p.add_argument("--thumb_width", type=int, default=480,
+                   help="width of the frames sent to the dashboard")
     p.add_argument("--display_height", type=int, default=540)
     p.add_argument("--show_denoised", action="store_true")
     p.add_argument("--headless", action="store_true", default=config.HEADLESS)

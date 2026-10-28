@@ -26,7 +26,7 @@ ROOT = Path(__file__).parent.resolve()
 DEVICE_PATHS = [
     "config.py", "main_pipeline.py", "node_agent.py", "enroll.py",
     "benchmark.py", "bench_denoise.py", "denoise.py", "check_device.py",
-    "check_models.py", "arcface_faiss.py", "gpfgan.py", "yolocropping.py",
+    "check_models.py", "calibrate.py", "arcface_faiss.py", "gpfgan.py", "yolocropping.py",
     "pipeline", "hub",
     # The suites run on the board too - they are how you tell a broken
     # install from a broken camera, and they need no model files.

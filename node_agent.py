@@ -158,7 +158,9 @@ def open_capture(source, width, height):
 
 
 def process_frame(frame, stages, timer, args):
-    """Returns (subjects payload, annotated frame for the operator view)."""
+    """Returns (subjects payload, annotated frame for the local preview,
+    plain frame for the hub). The hub draws its own overlay - IDs, trails,
+    predictions - so it gets the frame without boxes burnt in."""
     frame = downscale(frame, args.process_width)
     working = frame
     annotated = frame.copy()
@@ -167,10 +169,13 @@ def process_frame(frame, stages, timer, args):
         with timer("denoise"):
             working = stages.denoiser.denoise(frame)
 
+    # Report everyone in view - the hub tracks them all, which is what keeps
+    # IDs and dwell times stable - but run face work only on the largest
+    # (nearest) --max_subjects of them, which is the expensive part.
     subjects = []
     if stages.detector:
         with timer("detect"):
-            subjects = stages.detector.detect(working, max_subjects=args.max_subjects)
+            subjects = stages.detector.detect(working, max_subjects=config.TRACK_MAX_PEOPLE)
     elif stages.embedder:
         # No detector: treat the whole frame as one subject so the demo still
         # produces a comparable vector.
@@ -179,26 +184,29 @@ def process_frame(frame, stages, timer, args):
         subjects = [Subject(box=(0, 0, w, h), conf=1.0, crop=frame)]
 
     out = []
-    for subject in subjects:
+    for rank, subject in enumerate(subjects):
         crop = subject.crop
-        if stages.denoiser and args.denoise_scope == "crop":
-            with timer("denoise"):
-                crop = stages.denoiser.denoise(crop)
-
         face = None
         escalated = False
         embedding = None
+        recognise = rank < args.max_subjects          # largest first
 
-        if stages.embedder:
+        if recognise and stages.denoiser and args.denoise_scope == "crop":
+            with timer("denoise"):
+                crop = stages.denoiser.denoise(crop)
+
+        if recognise and stages.embedder:
             from pipeline.face_align import prepare_for_embedding
 
             # Align before embedding. ArcFace expects landmarks at fixed
             # positions; an unaligned person crop embeds clothing and pose.
             with timer("align"):
                 face = prepare_for_embedding(crop, size=config.ARCFACE_INPUT)
-            if face is None:
-                continue                      # no face here, nothing to send
 
+        # A person with no usable face is still sent - box only, no vector.
+        # The hub tracks them, so dwell time, loitering and the overlay work
+        # for people facing away or too far off for a face.
+        if stages.embedder and face is not None:
             mode = args.restore_mode if stages.restorer else "never"
 
             if mode == "always":
@@ -236,11 +244,11 @@ def process_frame(frame, stages, timer, args):
             "conf": subject.conf,
             "embedding": embedding,
             "escalated": escalated,
-            "face_thumb": encode_jpeg(face, quality=72, max_width=96)
-            if face is not None else encode_jpeg(crop, quality=65, max_width=96),
+            "face_thumb": encode_jpeg(face, quality=72, max_width=96) if face is not None
+            else (encode_jpeg(crop, quality=65, max_width=96) if recognise else None),
         })
 
-    return out, annotated
+    return out, annotated, frame
 
 
 def main():
@@ -306,8 +314,26 @@ def main():
     print("streaming at up to %.1f obs/s, frame select: %s - Ctrl+C to stop\n"
           % (args.fps, args.frame_select))
 
+    # A video file would otherwise be read as fast as it decodes, so between
+    # two observations the footage jumps seconds ahead and people appear to
+    # teleport - the hub's tracker then keeps issuing new IDs. Replay files
+    # at their own frame rate, the way pipeline/sources.py does, so a file
+    # rehearses exactly like a live camera.
+    src = str(args.source)
+    is_file = not src.isdigit() and "://" not in src
+    file_period = 0.0
+    if is_file:
+        fps_file = cap.get(cv2.CAP_PROP_FPS) or 0.0
+        file_period = 1.0 / fps_file if 1.0 <= fps_file <= 240.0 else 1.0 / 25.0
+    next_frame = time.monotonic()
+
     try:
         while True:
+            if file_period:
+                delay = next_frame - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+                next_frame = max(next_frame + file_period, time.monotonic() - file_period)
             ok, frame = cap.read()
             if not ok:
                 print("[cam] read failed; reopening")
@@ -336,7 +362,7 @@ def main():
             best = None
 
             t0 = time.perf_counter()
-            subjects, annotated = process_frame(frame, stages, timer, args)
+            subjects, annotated, plain = process_frame(frame, stages, timer, args)
             elapsed = time.perf_counter() - t0
             inst = 1.0 / max(elapsed, 1e-6)
             fps_ema = inst if fps_ema == 0 else 0.85 * fps_ema + 0.15 * inst
@@ -346,10 +372,10 @@ def main():
                 node=args.name,
                 seq=seq,
                 subjects=subjects,
-                frame_shape=annotated.shape,
+                frame_shape=plain.shape,
                 fps=min(fps_ema, args.fps),
                 stages_ms=timer.summary(),
-                frame_thumb=encode_jpeg(annotated, args.thumb_quality, args.thumb_width),
+                frame_thumb=encode_jpeg(plain, args.thumb_quality, args.thumb_width),
             ))
 
             if seq % 25 == 0:

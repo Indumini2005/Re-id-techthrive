@@ -225,6 +225,36 @@ except urllib.error.HTTPError as e:
 hub.ingest({"node": "WEIRD"})           # no subjects, no timestamps
 check("minimal payload tolerated", True)
 
+# --- 9. scene analytics on the distributed path -----------------------------
+hub4 = Hub(index=db)
+res = hub4.ingest(build_observation(
+    node="CAM_A", seq=1,
+    subjects=[{"box": (10, 10, 100, 200), "conf": 0.9,
+               "embedding": l2_normalize(TRUE_A + 0.5 * rng.normal(size=D)), "face_thumb": None},
+              {"box": (300, 20, 380, 220), "conf": 0.8,           # facing away
+               "embedding": None, "face_thumb": None}],
+    frame_shape=(360, 640, 3)))
+scene = res.get("scene") or {}
+check("scene published with every update", "views" in scene and "people" in scene)
+rows = scene.get("views", {}).get("CAM_A", {}).get("tracks", [])
+check("a person with no visible face is still tracked",
+      len(rows) == 2 and sum(1 for r in rows if not r["has_face"]) == 1, str(rows)[:120])
+check("enrolled person named in the scene",
+      any(p["name"] == "Subject_A" and p["kind"] == "enrolled" for p in scene.get("people", [])))
+res = hub4.ingest(build_observation(
+    node="CAM_B", seq=1,
+    subjects=[{"box": (50, 10, 130, 200), "conf": 0.9,
+               "embedding": l2_normalize(rng.normal(size=D)), "face_thumb": None}],
+    frame_shape=(360, 640, 3)))
+check("a stranger becomes a visitor",
+      any(p["kind"] == "visitor" for p in res["scene"]["people"]),
+      str([(p["name"], p["kind"]) for p in res["scene"]["people"]]))
+check("track rows carry tracker IDs",
+      all(v["track_id"] for t in res["tracks"] for v in t["views"]))
+hub4.update_settings({"visitor_threshold": 0.6, "loiter_seconds": 45})
+check("visitor and loitering settings reach the analytics",
+      hub4.analytics.visitors.threshold == 0.6 and hub4.analytics.loiter_s == 45)
+
 server.shutdown()
 print("\n" + ("ALL PASS" if not failures else "%d FAILURE(S): %s" % (len(failures), failures)))
 sys.exit(1 if failures else 0)

@@ -28,6 +28,13 @@ frame from the other. The two embeddings are first compared **against each
 other** to establish they show the same person, then averaged into one
 gallery query.
 
+On top of identification sits a scene layer: every person is **tracked**
+with a Kalman filter, people who were never enrolled are **re-identified as
+"Visitor #N"**, each person's **journey** across the cameras is recorded,
+the system **predicts which camera they will appear at next** and scores
+itself, and **dwell time / loitering** is measured. A **web dashboard**
+shows all of it. See [Exhibition features](#exhibition-features).
+
 ---
 
 ## Stage 1 is classical, and crop-only
@@ -248,7 +255,9 @@ from 116.6 ms to 64.6 ms for one subject, and 433 ms to 225 ms for four.
 | `check_py36.py` | Fails loudly if device-side code uses post-3.6 syntax. |
 | `check_models.py` | Loads the three ONNX graphs, checks them against what the code assumes, times them. |
 | `setup_nano.sh` | One-time Nano setup on the stock Python 3.6: apt OpenCV, pip, numpy fix, onnxruntime-gpu, swap. |
-| `tests/run_all.py` | Runs the nine suites below. No model files, no camera needed. |
+| `calibrate.py` | Measures what a similarity score means on these cameras; enables confidence percentages. |
+| `sync_to_jetson.ps1` | Copies uncommitted code (and, with `-Models`, the models) from the laptop to the Nano. |
+| `tests/run_all.py` | Runs the eleven suites below. No model files, no camera needed. |
 | `hub/server.py` | Hub: pairs nodes, fuses, matches, serves the dashboard. |
 | `hub/static/dashboard.html` | The operator UI. |
 | `hub/protocol.py` | Node↔hub wire format and clock-offset correction. |
@@ -263,6 +272,11 @@ from 116.6 ms to 64.6 ms for one subject, and 433 ms to 225 ms for four.
 | `pipeline/stage1_denoise.py` | Classical crop restoration: median + bilateral, OpenCV only. |
 | `pipeline/stage2_detect.py` | YOLOv8 person detection and cropping. |
 | `pipeline/face_align.py` | Stage 3b: SCRFD face detection and the similarity warp ArcFace needs. |
+| `pipeline/analytics.py` | Scene layer: ties tracking, visitors, journeys, predictions and loitering together. |
+| `pipeline/tracker.py` | Per-camera Kalman tracker: stable IDs, velocity, where each person will be next. |
+| `pipeline/visitors.py` | In-memory re-identification of people never enrolled ("Visitor #N"). |
+| `pipeline/journey.py` | Visits per camera, learned walking times, scored next-camera predictions, loitering. |
+| `pipeline/calibration.py` | Score-to-probability fit behind the confidence percentages. |
 | `pipeline/stage3_restore.py` | GFPGAN face reconstruction. |
 | `pipeline/stage4_embed.py` | ArcFace 512-D embeddings. |
 | `pipeline/stage5_match.py` | FAISS index, persistence, cosine matching. |
@@ -293,6 +307,8 @@ plausible-looking output instead of an error:
 | `test_yolo_onnx.py` | Letterbox padding not undone — boxes land near the subject, so the crop looks fine and is wrong. |
 | `test_sync.py` | Frame pairing drift: a stale anchor can make one camera permanently consume the other's frames. Also frame selection: weaker-view ranking, per-camera scaling, no reuse, the age limit. |
 | `test_quality.py` | Noise passing for sharpness; a tilted head read as a turned one; the quality gate refusing the wrong faces. |
+| `test_tracker.py` | A 1-second prediction that misses the person; IDs that swap when two people cross, or reset after a missed frame. |
+| `test_analytics.py` | A stranger renamed on the second camera; a prediction scored wrongly; a loitering alert raised twice or never; a percentage shown without calibration; face work that starves people waiting for it. |
 | `test_fusion.py` | Two people merged into one track, or one person split across two. |
 | `test_hub.py` | A fresh observation fused with a minutes-old frame from a dead node. |
 | `test_index.py` | Gallery persistence and cosine matching across save/reload. |
@@ -492,14 +508,30 @@ projector. The page loads no external resources, so it works air-gapped.
 
 ### What the dashboard shows
 
+The same dashboard is served in both setups — by the hub here, or by the
+Nano itself with `main_pipeline.py --dashboard 8765`.
+
+- **Both camera feeds with a live overlay**: every person's box and ID,
+  their name (`Visitor #3`, or an enrolled name in red), confidence, dwell
+  time, the path they have walked, and a dashed box with an arrow for where
+  the Kalman filter predicts they will be in one second. Loitering people
+  are outlined in red.
 - **The cross-view similarity**, large and centre: cosine between CAM_A's and
   CAM_B's live embeddings, on a ring with the threshold marked.
-- Both camera previews with detection boxes, plus the restored face crops.
-- Gallery verdict: identity, fused score, best single view, and **fusion gain**
-  — the number that shows whether using two cameras actually helped.
-- Live threshold sliders (both thresholds, and the fusion mode) that take
-  effect immediately — useful for tuning during a demo.
-- Per-stage latency, node health, clock offset, sync skew, alert log.
+- Watchlist verdict: identity, confidence, best single view, and **fusion
+  gain** — the number that shows whether using two cameras actually helped.
+- **People**: a card per person seen recently — face, where they are or
+  when they left, dwell time, and their next-camera prediction with a
+  countdown bar over the predicted window.
+- **Live events**: new visitors, returning visitors, walks between cameras,
+  predictions and their outcomes, loitering.
+- **Journey timeline**: the last five minutes, one row per person, one lane
+  per camera, with walking times between cameras.
+- **Next-camera prediction**: the routes learned so far and the measured hit
+  rate.
+- Alerts (watchlist matches and loitering), live threshold sliders (cross-
+  view, watchlist, visitor, loitering time, fusion mode), edge efficiency,
+  per-stage latency.
 
 ### Two things worth knowing
 
@@ -524,6 +556,138 @@ enrolled, the hub still shows live cross-view similarity — which is the
 headline number anyway. With no detector, the whole frame is treated as one
 subject. Only stage 4 (ArcFace) is genuinely required; without it there are
 no vectors to compare.
+
+---
+
+## Exhibition features
+
+Everything here runs on top of identification, in numpy, at about a
+millisecond per cycle, and works in both setups. Code:
+`pipeline/analytics.py`, which ties together `tracker.py`, `visitors.py`,
+`journey.py` and `calibration.py`.
+
+On the Jetson, with the web UI:
+
+```bash
+python3 main_pipeline.py --dashboard 8765 --headless
+```
+
+then open `http://<jetson-ip>:8765/` on any laptop or phone on the same
+network. `--headless` skips the board's own window and frees memory; drop it
+if a monitor is plugged into the Nano, which then shows the same overlay.
+
+### Tracking, and prediction between frames
+
+Every person in view gets a constant-velocity Kalman filter per camera and
+a stable ID (`A3`, `B1`). The filter estimates velocity as well as position,
+so the system knows where someone is heading before the next detection; the
+overlay draws that as an arrow and a dashed box one second ahead. In the
+tests a steady walker's 1-second prediction lands within 3 px. With
+`--detect_every 2`, the frames in between are drawn from prediction alone,
+which halves the detector's cost while the boxes keep following people.
+
+Everyone is tracked — up to `TRACK_MAX_PEOPLE` (20) — but face recognition
+is rationed to `--max_subjects` people per camera per cycle (2 on the Nano),
+nearest and never-recognised first. An earlier version capped *detection*
+at that number instead; on real footage with more people than that in view,
+people dropped in and out of the results, their IDs kept resetting, and
+loitering never fired. Tracking everyone fixed it: same video, people kept
+one ID for 25+ seconds.
+
+### Track-then-recognise — the speed-up
+
+A person who is tracked and identified keeps that identity; their face is
+re-checked only every `--embed_refresh` seconds (default 2), or at once if
+they cross another person, which is where a tracker can swap two people.
+After a crop gives no usable face, the next attempt waits a second.
+
+ArcFace is the most expensive stage on the Nano (122 ms per face on the
+GPU), so this matters. On the pedestrian test video, tracking skipped 83%
+of face checks — mostly deferred retries, since that video's faces are too
+small to use. With real, visible faces the effect is different but larger
+per person: ArcFace about once per two seconds per person instead of every
+cycle. **`--embed_refresh 0` restores the old every-cycle behaviour**, which
+makes a clean before/after comparison for the judges. The Nano figures have
+still to be measured.
+
+### Visitors — re-identifying people nobody enrolled
+
+The first time a face is seen it gets a temporary name, `Visitor #N`, and
+it is recognised again when it reappears on either camera: *"Visitor #3
+recognised again on CAM_B — last seen on CAM_A 8 s ago."* Each visitor is
+compared by the average of their recent looks, which is steadier than any
+single frame. If the two cameras see someone at the same moment under two
+different names, the names are merged; if a visitor turns out to be
+enrolled, their journey continues under their real name.
+
+Visitors exist **only in memory** and are forgotten 10 minutes after they
+were last seen (`VISITOR_TTL_S`). The threshold (0.45, a dashboard slider)
+is a live-vs-live comparison like the cross-view one. Lowering it to "catch
+more" is the wrong fix: ArcFace places poor faces close together (see
+[Face alignment is not optional](#models-to-copy-into-models)), so a low
+threshold merges strangers.
+
+### Journeys and next-camera prediction
+
+Each sighting extends a person's visit to a camera; a gap of 3 s ends it.
+When a visit ends and the same person's next visit starts on the other
+camera, that walking time is learned for that route. When someone then
+leaves a camera, the system predicts where they will appear next and in
+what window — *"expected at CAM_B in ~8 s (4–14 s)"* — and when they arrive
+it scores itself: a hit if the camera and the time are right. The running
+hit rate is on the dashboard.
+
+Be precise about this when presenting: it is a statistic learned from real
+walks during the session, not a trained model. Until someone has walked a
+route once it says "learning". With five or more walks the window is the
+10th–90th percentile band of the walking times plus a margin; with fewer
+it is a wide margin around what was seen. Coming back to the same camera
+before anyone could have reached the other one withdraws the prediction
+rather than counting it as a miss.
+
+**Camera placement decides what you can show.** Two cameras on the same
+spot give multi-angle fusion, but nobody ever *walks* between them, so
+there are no routes to learn. Two cameras on different spots give walks and
+predictions, but never two angles at once. Partly overlapping views give
+some of both; plan the stand around which story matters more.
+
+### Dwell time and loitering
+
+Each person's continuous time in view at a camera is shown on their box
+and their card. Past `--loiter_seconds` (30 by default, also a slider) a
+loitering alert fires once per visit. It works without a face — the track
+alone is enough — so it also covers people facing away. On the pedestrian
+test video it raised 11 alerts on people who stayed in view over 30 s.
+
+### Confidence percentages
+
+A cosine score is not a probability, so the dashboard shows **raw scores
+labelled "uncalibrated"** until the relationship has been measured on these
+cameras:
+
+```bash
+# calib/<person>/<5-10 photos each>, ideally taken with the actual cameras
+python3 calibrate.py --dir calib
+python3 calibrate.py --show
+```
+
+It fits P(same person | score) from every same-person and different-person
+pair of photos, refuses data too thin to support a percentage, never shows
+0% or 100%, and prints the equal error rate — a check on whether the
+thresholds suit these cameras. Percentages assume a same-person and a
+different-person pair are equally likely beforehand; the dashboard says
+so. `--from_gallery` reuses enrolled vectors instead, which is convenient
+but optimistic.
+
+### What has not been measured yet
+
+- **None of this has run on the Nano yet** — it was built and checked on a
+  laptop (11 test suites, Python 3.6 compatibility, the real pipeline with
+  real models on a pedestrian video). Run `tests/run_all.py` and a short
+  session on the board before relying on its speed.
+- **Visitors, journeys and predictions need real faces**, and the test video
+  has none usable. Their logic is tested on synthetic people; the thresholds
+  have not been tested on real faces.
 
 ---
 
@@ -641,3 +805,12 @@ the active profile.
   local. `.gitignore` excludes them.
 - The vector DB stores 512-D embeddings, not images, unless you pass
   `--save_faces` during enrollment.
+- **Matched people are photographed by default.** `SAVE_MATCHES = True`
+  writes the frames and face of every watchlist match to `captures/`. Run
+  with `--no_save_matches` if only embeddings may be kept.
+- Visitors (people never enrolled) live in memory only and are forgotten
+  10 minutes after they were last seen; nothing about them is written to
+  disk.
+- **The dashboard has no login.** Anyone on the same network who opens its
+  address sees the camera frames and faces. Use a network you control - not
+  a venue's open WiFi - and stop the pipeline when the demo ends.

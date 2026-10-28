@@ -34,6 +34,7 @@ degradation_preview.png
 tests/db_test/
 tests/fuse_test/
 tests/hub_db/
+tests/analytics_tmp/
 
 .vscode/
 .idea/

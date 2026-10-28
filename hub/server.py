@@ -8,6 +8,15 @@ Run this on the laptop that shows the UI:
 Then point each capture laptop's node_agent at it. The dashboard is at
 http://<this-laptop-ip>:8765/ and updates over Server-Sent Events.
 
+The same dashboard also serves the single-board setup: run
+``main_pipeline.py --dashboard 8765`` on the Jetson and it starts this
+server in-process and publishes its results to it (Hub.publish), so a
+laptop or phone on the same network just opens http://<jetson-ip>:8765/.
+
+Both paths run pipeline/analytics.py, so tracking, visitor
+re-identification, journeys, predictions and loitering look identical
+either way. Its output rides under the ``scene`` key of every update.
+
 Standard library only (plus numpy). No framework, no CDN, no outbound
 network access - the page is served entirely from disk, so the whole system
 still works on an air-gapped LAN.
@@ -39,6 +48,7 @@ from hub.protocol import (  # noqa: E402
     dumps,
     loads,
 )
+from pipeline.analytics import SceneAnalytics, fused_track_payload  # noqa: E402
 from pipeline.fusion import CrossViewFusion, ViewObservation  # noqa: E402
 from pipeline.vectors import cosine  # noqa: E402
 
@@ -91,12 +101,54 @@ class NodeState:
         }
 
 
-class Hub:
-    """Ingests node observations, pairs them, fuses, matches, broadcasts."""
+def compose_result(started, cameras, skew_ms, in_sync, similarity, track_payloads,
+                   nodes, frames, settings, gallery, stats, alerts, scene):
+    """The update the dashboard renders. Shared by Hub._fuse (distributed)
+    and main_pipeline.py (single board) so both produce the same shape."""
+    return {
+        "ts": time.time(),
+        "uptime_s": round(time.time() - started, 1),
+        "cameras": sorted(cameras),
+        "skew_ms": round(skew_ms, 1),
+        "in_sync": in_sync,
+        "similarity": None if similarity is None else round(similarity, 4),
+        "tracks": track_payloads,
+        "nodes": nodes,
+        "frames": frames,
+        "settings": dict(settings),
+        "gallery": gallery,
+        "stats": stats,
+        "alerts": list(alerts)[-12:],
+        "scene": scene,
+    }
 
-    def __init__(self, sync_window_ms=None, max_alerts=100):
+
+def alert_from_event(ev):
+    """Analytics events that warrant an operator alert, in alert-table form."""
+    if ev.get("kind") != "loiter":
+        return None
+    return {"at": ev.get("at") or time.strftime("%H:%M:%S"), "kind": "loiter",
+            "identity": ev.get("text", "").split(" has been")[0],
+            "camera": ev.get("camera"), "text": ev.get("text"),
+            "score": None, "cross_view": None, "cameras": [ev.get("camera")],
+            "multiview": False, "agreement": False}
+
+
+class Hub:
+    """Ingests node observations, pairs them, fuses, matches, broadcasts.
+
+    ``fusion`` and ``analytics`` can be passed in so main_pipeline.py can
+    share its own objects with the dashboard: then dashboard threshold
+    changes act on the pipeline directly.
+    """
+
+    def __init__(self, sync_window_ms=None, max_alerts=100, fusion=None,
+                 analytics=None, index="load"):
         self.nodes = {}
         self.lock = threading.Lock()
+        # Fusion and analytics are stateful and not thread-safe; nodes post
+        # concurrently, so each observation is processed under this lock.
+        self._process_lock = threading.RLock()
         self.subscribers = []
         self.alerts = deque(maxlen=max_alerts)
         self.started = time.time()
@@ -118,25 +170,41 @@ class Hub:
             # silently fusing against its last frame forever.
             "max_pair_age_ms": 1000.0,
             "alert_cooldown_s": 10.0,
+            "visitor_threshold": getattr(config, "VISITOR_THRESHOLD", 0.45),
+            "loiter_seconds": getattr(config, "LOITER_SECONDS", 30.0),
         }
         self._last_alert = {}
 
         # The gallery is optional: with no enrolled identities the dashboard
         # still shows live cross-view similarity, which is the headline number.
         self.index = None
-        try:
-            from pipeline.stage5_match import get_index
-            self.index = get_index()
-            print("[hub] gallery: %s" % self.index.stats())
-        except Exception as exc:
-            print("[hub] gallery unavailable (%s); running in similarity-only mode" % exc)
+        if index != "load":
+            self.index = index
+        else:
+            try:
+                from pipeline.stage5_match import get_index
+                self.index = get_index()
+                print("[hub] gallery: %s" % self.index.stats())
+            except Exception as exc:
+                print("[hub] gallery unavailable (%s); running in similarity-only mode" % exc)
 
-        self.fusion = CrossViewFusion(
-            index=self.index,
-            cross_view_threshold=self.settings["cross_view_threshold"],
-            gallery_threshold=self.settings["gallery_threshold"],
-            fusion_mode=self.settings["fusion_mode"],
-        )
+        if fusion is not None:
+            self.fusion = fusion
+            self.settings["cross_view_threshold"] = fusion.cross_view_threshold
+            self.settings["gallery_threshold"] = fusion.gallery_threshold
+            self.settings["fusion_mode"] = fusion.fusion_mode
+        else:
+            self.fusion = CrossViewFusion(
+                index=self.index,
+                cross_view_threshold=self.settings["cross_view_threshold"],
+                gallery_threshold=self.settings["gallery_threshold"],
+                fusion_mode=self.settings["fusion_mode"],
+            )
+        self.analytics = analytics if analytics is not None else SceneAnalytics()
+        if analytics is not None:
+            self.settings["visitor_threshold"] = analytics.visitors.threshold
+            self.settings["loiter_seconds"] = analytics.loiter_s
+        self.analytics.apply_settings(self.settings)
         self.last_result = None
 
     # -- subscribers -------------------------------------------------------
@@ -171,32 +239,56 @@ class Hub:
         name = payload.get("node") or "UNKNOWN"
         now = time.time()
 
-        with self.lock:
-            node = self.nodes.get(name)
-            if node is None:
-                node = NodeState(name)
-                self.nodes[name] = node
-                print("[hub] node joined: %s" % name)
+        with self._process_lock:
+            with self.lock:
+                node = self.nodes.get(name)
+                if node is None:
+                    node = NodeState(name)
+                    self.nodes[name] = node
+                    print("[hub] node joined: %s" % name)
 
-            node.clock.update(payload.get("captured_at", now), now)
-            hub_time = node.clock.to_hub_time(payload.get("captured_at", now))
+                node.clock.update(payload.get("captured_at", now), now)
+                hub_time = node.clock.to_hub_time(payload.get("captured_at", now))
 
-            if node.last_seen:
-                dt = now - node.last_seen
-                inst = 1.0 / dt if dt > 0 else 0.0
-                node.fps = inst if node.fps == 0 else 0.8 * node.fps + 0.2 * inst
-            node.last_seen = now
-            node.frames += 1
-            node.last_payload = payload
-            node.stages_ms = payload.get("stages_ms", {})
-            node.buffer.append((hub_time, payload))
+                if node.last_seen:
+                    dt = now - node.last_seen
+                    inst = 1.0 / dt if dt > 0 else 0.0
+                    node.fps = inst if node.fps == 0 else 0.8 * node.fps + 0.2 * inst
+                node.last_seen = now
+                node.frames += 1
+                node.last_payload = payload
+                node.stages_ms = payload.get("stages_ms", {})
+                node.buffer.append((hub_time, payload))
 
-            partner = self._find_partner(name, hub_time)
+                partner = self._find_partner(name, hub_time)
 
-        result = self._fuse(name, hub_time, payload, partner)
-        self.last_result = result
+            # Track this camera's people and record their faces. The track
+            # objects ride along in the payload (never serialised) so that
+            # when this observation is used as another node's partner, its
+            # people keep the same identities.
+            subjects = payload.get("subjects") or []
+            tracks = self.analytics.track(
+                name, hub_time,
+                [tuple(s.get("box") or (0, 0, 0, 0)) for s in subjects],
+                [float(s.get("conf") or 0.0) for s in subjects],
+                (payload.get("frame_w"), payload.get("frame_h")))
+            for s, trk in zip(subjects, tracks):
+                vec = decode_vector(s.get("embedding"))
+                s["_vec"], s["_trk"] = vec, trk
+                if vec is not None:
+                    self.analytics.face_result(trk, hub_time, embedding=vec,
+                                               thumb=s.get("face_thumb"))
+
+            result = self._fuse(name, hub_time, payload, partner)
+            self.last_result = result
         self.broadcast({"type": "update", "data": result})
         return result
+
+    def publish(self, result):
+        """Single-board mode: main_pipeline.py did all the work; just serve it."""
+        with self._process_lock:
+            self.last_result = result
+        self.broadcast({"type": "update", "data": result})
 
     def _find_partner(self, name, hub_time):
         """Closest-in-time observation from another node, if one is recent
@@ -235,15 +327,23 @@ class Hub:
         observations = {}
         for cam, pl in views.items():
             obs_list = []
-            for s in pl.get("subjects", []):
-                vec = decode_vector(s.get("embedding"))
+            for s in pl.get("subjects") or []:
+                vec = s["_vec"] if "_vec" in s else decode_vector(s.get("embedding"))
+                trk = s.get("_trk")
+                cached = False
+                if vec is None and trk is not None and trk.embedding is not None:
+                    # Face not visible in this frame, but this person's track
+                    # has one from earlier: they stay identifiable.
+                    vec, cached = trk.embedding, True
                 obs = ViewObservation(
                     camera=cam,
-                    box=tuple(s.get("box", (0, 0, 0, 0))),
-                    conf=float(s.get("conf", 0.0)),
+                    box=tuple(s.get("box") or (0, 0, 0, 0)),
+                    conf=float(s.get("conf") or 0.0),
                     crop=np.zeros((1, 1, 3), np.uint8),   # pixels stay on the node
                     embedding=vec,
                     escalated=bool(s.get("escalated", False)),
+                    track=trk,
+                    cached=cached,
                 )
                 obs._thumb = s.get("face_thumb")
                 obs_list.append(obs)
@@ -251,6 +351,10 @@ class Hub:
 
         self._sync_fusion_settings()
         tracks = self.fusion.process(observations) if observations else []
+        for ev in self.analytics.resolve(hub_time, tracks):
+            alert = alert_from_event(ev)
+            if alert is not None:
+                self.alerts.append(alert)
 
         # Headline number: best cross-view similarity in this frame pair.
         best_similarity = None
@@ -264,29 +368,31 @@ class Hub:
         if not in_sync:
             self.pairs_skewed += 1
 
-        track_payloads = [self._track_payload(t) for t in tracks]
+        track_payloads = [fused_track_payload(t, self.analytics.calibrator) for t in tracks]
         for t, tp in zip(tracks, track_payloads):
             self._maybe_alert(t, tp)
 
-        return {
-            "ts": time.time(),
-            "uptime_s": round(time.time() - self.started, 1),
-            "cameras": sorted(views.keys()),
-            "skew_ms": round(skew_ms, 1),
-            "in_sync": in_sync,
-            "similarity": None if best_similarity is None else round(best_similarity, 4),
-            "tracks": track_payloads,
-            "nodes": [n.summary() for n in self.nodes.values()],
-            "frames": {cam: pl.get("frame_thumb") for cam, pl in views.items()},
-            "settings": dict(self.settings),
-            "gallery": self.index.stats() if self.index else None,
-            "stats": {
-                "pairs": self.pairs_emitted,
-                "skewed": self.pairs_skewed,
-                "alerts": len(self.alerts),
-            },
-            "alerts": list(self.alerts)[-12:],
-        }
+        # Show every camera's latest frame, not just the two being paired.
+        frames = {n: st.last_payload.get("frame_thumb")
+                  for n, st in self.nodes.items() if st.last_payload and st.online}
+        frames.update({cam: pl.get("frame_thumb") for cam, pl in views.items()})
+
+        return compose_result(
+            started=self.started,
+            cameras=views.keys(),
+            skew_ms=skew_ms,
+            in_sync=in_sync,
+            similarity=best_similarity,
+            track_payloads=track_payloads,
+            nodes=[n.summary() for n in self.nodes.values()],
+            frames=frames,
+            settings=self.settings,
+            gallery=self.index.stats() if self.index else None,
+            stats={"pairs": self.pairs_emitted, "skewed": self.pairs_skewed,
+                   "alerts": len(self.alerts)},
+            alerts=self.alerts,
+            scene=self.analytics.state(hub_time),
+        )
 
     def _best_unpaired_similarity(self, observations):
         """Both cameras saw somebody, but association rejected the pairing.
@@ -307,42 +413,6 @@ class Hub:
                             best = score
         return best
 
-    def _track_payload(self, track):
-        views = []
-        for obs in track.observations:
-            views.append({
-                "camera": obs.camera,
-                "box": list(obs.box),
-                "conf": round(obs.conf, 3),
-                "escalated": obs.escalated,
-                "thumb": getattr(obs, "_thumb", None),
-                "solo": {
-                    "identity": obs.solo_match.identity,
-                    "score": round(obs.solo_match.score, 4),
-                    "is_match": obs.solo_match.is_match,
-                } if obs.solo_match else None,
-            })
-
-        solo_scores = [v["solo"]["score"] for v in views if v["solo"]]
-        fused_score = round(track.match.score, 4) if track.match else None
-        gain = None
-        if fused_score is not None and solo_scores:
-            gain = round(fused_score - max(solo_scores), 4)
-
-        return {
-            "cameras": track.cameras,
-            "n_views": track.n_views,
-            "multiview": track.is_multiview,
-            "cross_view_score": round(track.cross_view_score, 4),
-            "identity": track.match.identity if track.match else None,
-            "score": fused_score,
-            "is_match": bool(track.match and track.match.is_match),
-            "agreement": track.agreement,
-            "fusion_gain": gain,
-            "notes": list(track.notes),
-            "views": views,
-        }
-
     def _maybe_alert(self, track, payload):
         if not payload["is_match"]:
             return
@@ -353,8 +423,10 @@ class Hub:
         self._last_alert[identity] = now
         self.alerts.append({
             "at": time.strftime("%H:%M:%S"),
+            "kind": "match",
             "identity": identity,
             "score": payload["score"],
+            "confidence": payload.get("confidence"),
             "cross_view": payload["cross_view_score"],
             "cameras": payload["cameras"],
             "multiview": payload["multiview"],
@@ -371,33 +443,34 @@ class Hub:
 
     def update_settings(self, changes):
         allowed = {"cross_view_threshold", "gallery_threshold", "fusion_mode",
-                   "sync_window_ms", "max_pair_age_ms", "alert_cooldown_s"}
-        for key, value in changes.items():
-            if key not in allowed:
-                continue
-            self.settings[key] = value if key == "fusion_mode" else float(value)
-        self._sync_fusion_settings()
+                   "sync_window_ms", "max_pair_age_ms", "alert_cooldown_s",
+                   "visitor_threshold", "loiter_seconds"}
+        with self._process_lock:
+            for key, value in changes.items():
+                if key not in allowed:
+                    continue
+                self.settings[key] = value if key == "fusion_mode" else float(value)
+            self._sync_fusion_settings()
+            self.analytics.apply_settings(self.settings)
         self.broadcast({"type": "settings", "data": dict(self.settings)})
         return dict(self.settings)
 
     def snapshot(self):
-        if self.last_result:
-            result = dict(self.last_result)
-            result["nodes"] = [n.summary() for n in self.nodes.values()]
-            return result
-        return {
-            "ts": time.time(),
-            "uptime_s": round(time.time() - self.started, 1),
-            "cameras": [],
-            "similarity": None,
-            "tracks": [],
-            "nodes": [n.summary() for n in self.nodes.values()],
-            "frames": {},
-            "settings": dict(self.settings),
-            "gallery": self.index.stats() if self.index else None,
-            "stats": {"pairs": 0, "skewed": 0, "alerts": 0},
-            "alerts": [],
-        }
+        with self._process_lock:
+            if self.last_result:
+                result = dict(self.last_result)
+                if self.nodes:
+                    result["nodes"] = [n.summary() for n in self.nodes.values()]
+                return result
+            return compose_result(
+                started=self.started, cameras=[], skew_ms=0.0, in_sync=True,
+                similarity=None, track_payloads=[],
+                nodes=[n.summary() for n in self.nodes.values()], frames={},
+                settings=self.settings,
+                gallery=self.index.stats() if self.index else None,
+                stats={"pairs": 0, "skewed": 0, "alerts": 0}, alerts=[],
+                scene=self.analytics.state(time.time()),
+            )
 
 
 # --- HTTP ------------------------------------------------------------------
