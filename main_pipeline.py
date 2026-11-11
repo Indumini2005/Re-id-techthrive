@@ -306,7 +306,7 @@ def run(args):
     capture = SyncedCapture(
         cameras,
         sync_window_ms=args.sync_window,
-        use_gstreamer=not args.no_gstreamer,
+        use_gstreamer=config.USE_GSTREAMER and not args.no_gstreamer,
         target_fps=args.capture_fps,
         require_all=not args.allow_single_camera,
         frame_select=args.frame_select,
@@ -654,7 +654,7 @@ def parse_args():
     p.add_argument("--sync_window", type=float, default=config.SYNC_WINDOW_MS,
                    help="max ms between paired frames before they count as skewed")
     p.add_argument("--no_gstreamer", action="store_true",
-                   help="skip the Jetson GStreamer path (use off-device)")
+                   help="skip the Jetson GStreamer path (already off on a laptop)")
     p.add_argument("--allow_single_camera", action="store_true",
                    help="emit pairs even when one camera is down")
     p.add_argument("--startup_timeout", type=float, default=15.0)

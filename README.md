@@ -467,6 +467,27 @@ works — pass one `--source` and fusion falls through to direct matching.
 | `s` | snapshot the composed dual view to `captures/` |
 | `d` | toggle between the raw and denoised display |
 
+### Without the Jetson: everything on a laptop
+
+The same code runs on a Windows or Linux laptop with no changes to make:
+the profile becomes `workstation`, GStreamer is skipped, RTSP is read over
+TCP by OpenCV's FFmpeg backend, and a GPU provider that the installed
+onnxruntime lacks falls back to the CPU. The laptop must be on the same
+network as the cameras.
+
+```powershell
+pip install -r requirements.txt
+.\run_local.ps1 -CamA "rtsp://user:pass@192.168.1.35:554/stream1" -CamB "rtsp://..."
+.\run_local.ps1 -Webcam                     # laptop webcam instead
+.\run_local.ps1 -Video clip.mp4             # dry run: one clip as both cameras
+```
+
+It starts the pipeline with `--dashboard 8765 --headless` and opens
+http://localhost:8765/. The watchlist (`vector_db/`) is per machine, so
+enroll again on the laptop (`python enroll.py capture ...`). On a laptop CPU
+the full stack ran at about 10 frame pairs/s on the test clip, against 2.2 on
+the Nano.
+
 ---
 
 ## Distributed mode: two laptops + a dashboard

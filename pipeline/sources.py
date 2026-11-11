@@ -27,6 +27,7 @@ choice never reaches further back than one inference cycle: it trades a
 little recency for a frame worth processing, and cannot drift into the past.
 """
 
+import os
 import threading
 import time
 from collections import deque
@@ -37,6 +38,11 @@ import cv2
 import numpy as np
 
 import config
+
+# RTSP over TCP for OpenCV's FFmpeg backend (the path everywhere but the
+# Jetson). The default UDP loses packets on WiFi, which shows up as grey,
+# smeared frames. Must be set before the first VideoCapture is opened.
+os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
 
 
 @dataclass

@@ -364,10 +364,30 @@ apply_profile(PROFILE)
 INT8_MIN_COMPUTE = 6.1
 INT8_AVAILABLE = PROFILE not in ("nano",)
 
+# GStreamer hardware decode exists only on the Jetson boards. Everywhere else
+# (a Windows or Linux laptop) RTSP goes straight to OpenCV's FFmpeg backend.
+USE_GSTREAMER = PROFILE in ("nano", "xavier", "orin")
+
+
+def _installed_providers():
+    try:
+        import onnxruntime
+        return set(onnxruntime.get_available_providers())
+    except Exception:
+        return set()
+
 
 def provider_list(provider: str = None):
-    """ONNX Runtime provider list for the requested backend, with fallbacks."""
+    """ONNX Runtime provider list for the requested backend, with fallbacks.
+
+    Asking for a GPU backend that this onnxruntime build does not have (a
+    laptop with the CPU-only wheel) gives the CPU list directly, instead of
+    a warning from every model at start-up.
+    """
     provider = provider or EXEC_PROVIDER
+    installed = _installed_providers()
+    if provider in ("tensorrt", "cuda") and installed and "CUDAExecutionProvider" not in installed:
+        provider = "cpu"
     if provider == "tensorrt":
         return [
             (
